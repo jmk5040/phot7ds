@@ -349,13 +349,70 @@ PhotometryConfig(
 )
 ```
 
-## Testing
+## Testing and examples
+
+### Smoke tests (no data, no SE++, no network)
 
 The included smoke tests cover the import surface, the schema, the config
 machinery, the kwarg-vs-config merge, the polygon trim, and the batch loop.
-They never invoke `sourcextractor++` or fetch anything from the network.
+
+```bash
+cd phot7ds          # repository root
+python -m pytest tests/ -v
+```
+
+### End-to-end example (`examples/example_run.py`)
+
+`examples/example_run.py` is a runnable script for a **full** pipeline on one
+tile: optional DELVE detection + mask build, then `run_photometry` with a
+DELVE bad-pixel mask and residual plots.
+
+**Before running**, edit the path block at the top of the script for your
+machine:
+
+| Variable | Purpose |
+| -------- | ------- |
+| `SEPP_CONFIG` | SourceExtractor++ config (`7ds_sepp.config`) |
+| `SWARP_CONFIG` | SWarp config (only if building DELVE images) |
+| `TILE_TABLE` | `7DT_tiles.ascii` (or `.fits`) with `tile`, `ra1`–`ra4`, `dec1`–`dec4` |
+| `REFERENCE_DIR` | Directory of `gaiaxp_dr3_synphot_{tile}.csv` files |
+| `DETECT_IMG_DIR` | Where DELVE detection / mask FITS files live or are written |
+| `science_images` | List of calibrated science FITS paths for one tile |
+| `OUTPUT_DIR` | Working directory for catalogs, logs, figures |
+
+Science images must have `OBJECT` (tile id), `OBJCTRA`, and `OBJCTDEC` in the
+header when building DELVE images from the script.
+
+**Run** (from the repository root, with `sourcextractor++` on `$PATH`):
 
 ```bash
 cd phot7ds
-python -m pytest tests/ -v
+pip install -e .    # or: export PYTHONPATH=$PWD:$PYTHONPATH
+
+# optional: conda activate your env (e.g. 7ds)
+python examples/example_run.py
 ```
+
+By default the script calls `run_single()` (one `run_photometry` job). To try
+the batch helper instead, change the bottom of the file to `run_batch()`.
+
+**External requirements for this example** (unlike the smoke tests):
+
+- [`sourcextractor++`](https://sextractor.readthedocs.io/) on `$PATH`
+- [`SWarp`](https://www.astromatic.net/software/swarp/) if cached DELVE images
+  are missing and the script builds them (`FORCE_BUILD_DELVE = True` forces a
+  rebuild)
+- Network access for DELVE patch download when coadds are built
+- A Gaia XP synphot CSV for the tile: `{REFERENCE_DIR}/gaiaxp_dr3_synphot_{tile}.csv`
+
+**Typical output** (under `examples/example_run/` by default):
+
+```
+catalog : .../examples/example_run/test.zp.fits
+manifest: .../examples/example_run/test_manifest.json
+log     : .../examples/example_run/test.log
+sources : <N>
+```
+
+Set `standardize_catalog=True` in `run_single()` if you want the canonical
+column layout (see [Canonical output schema](#canonical-output-schema-optional)).

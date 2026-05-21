@@ -1,22 +1,14 @@
 """
-Minimal end-to-end example for the ``phot7ds`` photometry pipeline.
+End-to-end example: DELVE detection (optional) + ``run_photometry``.
 
-How to run
-----------
-From the ``Phot7DS`` directory, using the ``7ds`` conda env::
+Edit the path constants below for your system, then from the repository root::
 
-    cd /data/data1/7DS/RIS/script/Phot7DS
-    conda activate 7ds
-    PYTHONPATH=. python examples/example_run.py
-
-Or export ``PYTHONPATH`` once per shell session::
-
-    export PYTHONPATH=/data/data1/7DS/RIS/script/Phot7DS:$PYTHONPATH
+    pip install -e .          # or: export PYTHONPATH=$PWD:$PYTHONPATH
     python examples/example_run.py
 
-If no cached DELVE coadd exists under ``data/detect_imgs/{tile}/``, the script
-downloads DELVE patches (network) and runs SWarp. Set ``FORCE_BUILD_DELVE =
-True`` in this file to rebuild even when a coadd is already on disk.
+See README.md § "End-to-end example" for prerequisites (SE++, SWarp, Gaia XP,
+network when building DELVE). Set ``FORCE_BUILD_DELVE = True`` to rebuild
+DELVE image/mask even when cached files already exist.
 """
 
 from __future__ import annotations
@@ -135,7 +127,7 @@ def run_single() -> None:
         fixed_apertures_arcsec=(5.0, 10.0),
         save_residual_plots=True,
         thread_count=EXAMPLE["thread_count"],
-        standardize_catalog=True,
+        standardize_catalog=False,
     )
     print(f"catalog : {result.catalog_path}")
     print(f"manifest: {result.manifest_path}")
