@@ -8,8 +8,8 @@ Given:
 3. A reference catalog for zero-point calibration (Gaia XP synphot CSV).
 4. A SourceExtractor++ ``--config-file``.
 
-:func:`run_photometry` produces a single zero-point-calibrated FITS catalog
-with a stable column schema.
+:func:`run_photometry` produces a single zero-point-calibrated FITS catalog.
+Pass ``standardize_catalog=True`` for the fixed canonical column layout.
 
 Quickstart::
 

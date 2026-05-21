@@ -6,8 +6,10 @@ Monitoring Survey).
 
 Given a list of 7DS science images, a detection image, a SourceExtractor++
 config and a Gaia XP synphot reference catalog, `phot7ds.run_photometry()`
-returns a single zero-point-calibrated FITS catalog with a stable column
-schema.
+returns a single zero-point-calibrated FITS catalog. By default the table
+keeps the SE++ column layout plus calibration columns; pass
+`standardize_catalog=True` if you want the fixed canonical column order with
+placeholder columns for missing bands.
 
 The original `RIS_catalog_sepp.py` / `DELVE_DetImage.py` / `Utils_7DT.py`
 scripts have been refactored into this reusable Python package; the legacy
@@ -131,6 +133,27 @@ Alternatively, omit both and use `run_name` + `output_dir` (auto names
 
 See `help(phot7ds.run_photometry)` for all optional knobs.
 
+### Canonical output schema (optional)
+
+`standardize_catalog` defaults to **`False`**. When left at the default, the
+written FITS file is the SE++ catalog after per-filter column splitting,
+Gaia XP zero-point calibration, and unit cleanup — no placeholder columns are
+added.
+
+Set `standardize_catalog=True` to reshape the table to the unified schema
+(same column order every time, missing bands filled with `-99.0`
+placeholders):
+
+```python
+result = run_photometry(
+    ...,
+    standardize_catalog=True,
+)
+```
+
+You can also call `phot7ds.standardize_catalog()` on an existing catalog
+outside the pipeline.
+
 ### Tile-polygon trim of the reference catalog
 
 If your tile geometry is known, pass a single-row table with
@@ -219,10 +242,6 @@ for r in results:
         print(f"FAIL {label}: {r.error}")
 ```
 
-There is **no** CSV-driven `(date, tile)` batch driver any more — the new
-API takes plain paths, so callers organise their image lists however they
-like.
-
 ### Detection-image construction
 
 The DELVE detection-image builder is callable directly:
@@ -248,10 +267,10 @@ detection_img, weight_img = build_delve_detection_image(
 
 ### Reading the output catalog
 
-The pipeline fills missing canonical columns with a finite sentinel
-(`PLACEHOLDER_FILL = -99.0`) so they read back as plain Columns (not
-`MaskedColumn`). Use `load_unified_catalog` if you'd rather see those as
-NaN:
+If the catalog was written with `standardize_catalog=True`, missing canonical
+columns use a finite sentinel (`PLACEHOLDER_FILL = -99.0`) so they read back
+as plain Columns (not `MaskedColumn`). Use `load_unified_catalog` if you'd
+rather see those as NaN:
 
 ```python
 from phot7ds import load_unified_catalog
@@ -261,7 +280,8 @@ print(cat.meta)   # {'NPLACE': ..., 'NEXTRA': ..., 'NDUPS': ...}
 
 ## Output schema
 
-Every catalog written by `phot7ds` has the same columns in the same order:
+When `standardize_catalog=True`, every catalog has the same columns in the
+same order:
 
 1. A fixed set of detection / geometry columns
    (`phot7ds.schema.CANONICAL_BASIC_COLS`): IDs, world/pixel centroids, error
@@ -278,6 +298,11 @@ Every catalog written by `phot7ds` has the same columns in the same order:
 Bands missing from the input image set are inserted as **placeholder
 columns** (value `-99.0`, `description == "PLACEHOLDER"`); the count is in
 `meta["NPLACE"]`.
+
+With the default `standardize_catalog=False`, column names and order follow
+SourceExtractor++ and the calibration step instead; only the bands present in
+`science_images` appear (plus spatially corrected `{aperture}c_mag_{band}`
+columns where calibration ran).
 
 ## Calibration
 
