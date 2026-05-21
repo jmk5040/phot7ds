@@ -359,14 +359,3 @@ They never invoke `sourcextractor++` or fetch anything from the network.
 cd phot7ds
 python -m pytest tests/ -v
 ```
-
-## Migrating from the legacy scripts
-
-| Legacy entry point                 | New entry point                                                       |
-| ---------------------------------- | --------------------------------------------------------------------- |
-| `RIS_catalog_sepp.py` main loop     | `phot7ds.batch_run(jobs=[...])` (a list of plain dicts, no CSV required) |
-| `DELVE_DetImage.py` main loop       | `phot7ds.detection.build_delve_detection_image(...)`                  |
-| `from Utils_7DT import *`           | `from phot7ds import <thing>` (see `phot7ds/__init__.py`)             |
-| Hardcoded `path_base`, `server`     | Plain kwargs / optional `PhotometryConfig`                            |
-| RSS / `malloc_trim` / `enforce_rss_guard` plumbing | Removed                                                  |
-| `Utils_7DT.{sex_config, hotpants, sepp_config, calculate_integrated_magnitude, extcor, synth_phot, get_fast_columns, ...}` | Removed; they weren't used by the calibrated-catalog pipeline |
