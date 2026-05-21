@@ -1,0 +1,38 @@
+# Bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*~
+
+# Example / pipeline run outputs (keep example_run.py only)
+examples/example_run/
+examples/**/*.fits
+examples/**/*.log
+examples/**/*_manifest.json
+examples/**/*_sepp.py
+
+# Large data products
+*.fits
+*.fit
+*.fz
+
+# Logs and local notes (optional dev scratch)
+*.log
+Note.md
