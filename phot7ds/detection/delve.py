@@ -37,6 +37,54 @@ def _get_tile_value(tile_info: Any, key: str):
     return tile_info[key]
 
 
+def deg_to_hms_dms(ra_deg: float, dec_deg: float) -> tuple[str, str]:
+    """Convert decimal degrees to SWarp / FITS sexagesimal strings.
+
+    RA is returned as ``HH:MM:SS.ss`` (hours); Dec as ``[+|-]DD:MM:SS.ss``.
+    Matches the convention used in ``Utils_7DT.deg_to_hms_dms``.
+    """
+    ra_deg = float(ra_deg)
+    dec_deg = float(dec_deg)
+
+    ra_hours = ra_deg / 15.0
+    rh = int(ra_hours)
+    rm = int((ra_hours - rh) * 60)
+    rs = ((ra_hours - rh) * 60 - rm) * 60
+    ra_str = f"{rh:02d}:{rm:02d}:{rs:05.2f}"
+
+    sign = "+" if dec_deg >= 0 else "-"
+    dec_abs = abs(dec_deg)
+    dd = int(dec_abs)
+    dm = int((dec_abs - dd) * 60)
+    ds = ((dec_abs - dd) * 60 - dm) * 60
+    dec_str = f"{sign}{dd:02d}:{dm:02d}:{ds:05.2f}"
+
+    return ra_str, dec_str
+
+
+def _resolve_swarp_center(
+    tile_info: Any,
+    ra_center: str | float | None,
+    dec_center: str | float | None,
+) -> tuple[str, str]:
+    """Return SWarp ``-CENTER`` sexagesimal strings."""
+    if ra_center is not None and dec_center is not None:
+        return str(ra_center), str(dec_center)
+    if ra_center is not None or dec_center is not None:
+        raise ValueError("pass both ra_center and dec_center, or neither")
+    ra_deg = round(float(_get_tile_value(tile_info, "ra")), 4)
+    dec_deg = round(float(_get_tile_value(tile_info, "dec")), 4)
+    ra_str, dec_str = deg_to_hms_dms(ra_deg, dec_deg)
+    log.info(
+        "SWarp center from tile table: RA=%s Dec=%s (%.4f deg, %.4f deg)",
+        ra_str,
+        dec_str,
+        ra_deg,
+        dec_deg,
+    )
+    return ra_str, dec_str
+
+
 def build_patch_centers(
     tile_info: Any,
     *,
@@ -69,8 +117,8 @@ def build_patch_centers(
 def build_delve_detection_image(
     *,
     tile_info: Any,
-    ra_center: str | float,
-    dec_center: str | float,
+    ra_center: str | float | None = None,
+    dec_center: str | float | None = None,
     imgtype: Literal["image", "mask"],
     output_path: str,
     swarp_cfg_path: str,
@@ -94,9 +142,14 @@ def build_delve_detection_image(
     ----------
     tile_info
         Single-row :class:`~astropy.table.Table` (or dict-like) with corners
-        ``ra1/dec1 .. ra4/dec4`` and the ``tile`` identifier.
+        ``ra1/dec1 .. ra4/dec4``, the ``tile`` identifier, and (when
+        ``ra_center`` / ``dec_center`` are omitted) ``ra`` / ``dec`` in
+        decimal degrees.
     ra_center, dec_center
-        Center used by SWarp for the output mosaic.
+        Center passed to SWarp as sexagesimal strings (e.g. FITS ``OBJCTRA`` /
+        ``OBJCTDEC``). If either is ``None``, both are taken from
+        ``round(tile_info['ra'], 4)`` and ``round(tile_info['dec'], 4)`` and
+        converted to ``HH:MM:SS`` / ``±DD:MM:SS``.
     imgtype
         ``'image'`` (science) or ``'mask'`` (bad-pixel mask).
     output_path
@@ -130,6 +183,8 @@ def build_delve_detection_image(
     """
     if imgtype not in ("image", "mask"):
         raise ValueError("imgtype must be 'image' or 'mask'")
+
+    ra_center, dec_center = _resolve_swarp_center(tile_info, ra_center, dec_center)
 
     tile = str(_get_tile_value(tile_info, "tile"))
     os.makedirs(output_path, exist_ok=True)
@@ -349,6 +404,7 @@ def _build_swarp_args(
 
 __all__ = [
     "DELVE_SIA_URL",
+    "deg_to_hms_dms",
     "build_delve_detection_image",
     "build_patch_centers",
 ]

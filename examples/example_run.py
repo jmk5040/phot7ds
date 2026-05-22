@@ -68,11 +68,8 @@ else:
     tile_info = tile_tbl[tile_tbl["tile"] == tile]
     if len(tile_info) == 0:
         raise ValueError(f"No row for tile {tile!r} in {TILE_TABLE}")
-    sci_hdr = fits.getheader(science_images[0])
     detection_image, _det_weight = build_delve_detection_image(
         tile_info=tile_info,
-        ra_center=sci_hdr["OBJCTRA"],
-        dec_center=sci_hdr["OBJCTDEC"],
         imgtype="image",
         output_path=DETECT_IMG_DIR,
         swarp_cfg_path=SWARP_CONFIG,
@@ -80,8 +77,6 @@ else:
     )
     detection_mask, _det_weight = build_delve_detection_image(
         tile_info=tile_info,
-        ra_center=sci_hdr["OBJCTRA"],
-        dec_center=sci_hdr["OBJCTDEC"],
         imgtype="mask",
         output_path=DETECT_IMG_DIR,
         swarp_cfg_path=SWARP_CONFIG,

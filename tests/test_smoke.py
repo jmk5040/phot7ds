@@ -146,6 +146,25 @@ def test_run_photometry_kwargs_override_config(monkeypatch: pytest.MonkeyPatch) 
     assert merged.thread_count == 4
 
 
+def test_deg_to_hms_dms() -> None:
+    from phot7ds.detection.delve import deg_to_hms_dms
+
+    ra_str, dec_str = deg_to_hms_dms(78.49624060150376, -61.9811320754717)
+    assert ra_str == "05:13:59.10"
+    assert dec_str == "-61:58:52.08"
+
+
+def test_resolve_swarp_center_from_tile_table() -> None:
+    from phot7ds.detection.delve import _resolve_swarp_center
+
+    tile_info = Table(
+        {"tile": ["T06910"], "ra": [220.0], "dec": [-39.90566037735849]}
+    )
+    ra_str, dec_str = _resolve_swarp_center(tile_info, None, None)
+    assert ra_str == "14:40:00.00"
+    assert dec_str == "-39:54:20.52"
+
+
 def test_canonical_schema_layout() -> None:
     from phot7ds.schema import CANONICAL_BASIC_COLS, build_canonical_schema
 

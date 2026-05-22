@@ -255,11 +255,12 @@ tile_info = tile_tbl[tile_tbl["tile"] == "T01234"]
 
 detection_img, weight_img = build_delve_detection_image(
     tile_info=tile_info,
-    ra_center="12:34:56.7", dec_center="-01:02:03.4",
     imgtype="image",
     output_path="/data/.../detect_imgs/T01234",
     swarp_cfg_path="/data/data1/7DS/RIS/config/7ds.swarp",
 )
+# SWarp center defaults to round(tile_info['ra'], 4) / round(tile_info['dec'], 4)
+# converted to sexagesimal. Override with ra_center= / dec_center= if needed.
 ```
 
 `imgtype="mask"` builds a bad-pixel mask suitable for passing as
