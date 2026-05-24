@@ -43,7 +43,7 @@ DETECT_IMG_DIR = f"/data/data1/7DS/DELVE/" # DELVE or 7DS detection image direct
 FORCE_BUILD_DELVE = False
 
 # number of cores for the photometry pipeline
-NCORES = 8
+NCORES = 12
 
 # required science images common header keys: OBJECT, OBJCTRA, OBJCTDEC (for DELVE detection image building)
 science_images = ['/data/data1/processed_1x1_gain2750/T06910/7DT14/m625/calib_7DT14_T06910_20250620_024540_m625_300.com.fits',

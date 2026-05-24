@@ -60,6 +60,17 @@ from .calibration import (
     match_nearest,
 )
 from .config import PhotometryConfig
+from .depth import (
+    classical_limiting_mag,
+    depth_from_empty_apertures,
+    depth_from_error_curve,
+    depth_results_to_meta,
+    empty_aperture_sky_sigma,
+    estimate_depths,
+    format_depth_table,
+    magerr_threshold_for_n_sigma,
+    zeropoints_to_meta,
+)
 from .filters import DEFAULT_BANDS, get_filter_definitions
 from .images import (
     build_coverage_mask,
@@ -82,7 +93,7 @@ from .sepp import (
 )
 from .tile_geometry import trim_to_tile_polygon
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "__version__",
@@ -109,6 +120,16 @@ __all__ = [
     "apply_spatial_zeropoint",
     "calibrate_zeropoints",
     "match_nearest",
+    # depth
+    "classical_limiting_mag",
+    "depth_from_empty_apertures",
+    "depth_from_error_curve",
+    "depth_results_to_meta",
+    "empty_aperture_sky_sigma",
+    "estimate_depths",
+    "format_depth_table",
+    "magerr_threshold_for_n_sigma",
+    "zeropoints_to_meta",
     # schema / IO
     "build_canonical_schema",
     "standardize_catalog",

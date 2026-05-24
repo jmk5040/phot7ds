@@ -76,6 +76,14 @@ class PhotometryConfig:
     save_residual_plots: bool = False
     plot_axiscolor: str = "elongation"
 
+    # --- Depth estimation ---
+    estimate_depth: bool = True
+    depth_n_sigma: float = 5.0
+    depth_apertures: tuple[str, ...] = ("aper5",)
+    depth_n_empty_apertures: int = 2000
+    depth_empty_aperture: bool = True
+    depth_seed: int = 42
+
     def replace(self, **changes: Any) -> "PhotometryConfig":
         """Return a copy with ``changes`` overridden (frozen dataclass safe)."""
         return dataclasses.replace(self, **changes)

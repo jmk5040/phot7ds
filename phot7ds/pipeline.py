@@ -25,6 +25,12 @@ from astropy.io import fits
 from ._logging import configure_logging
 from .calibration import calibrate_zeropoints, load_gaiaxp_reference
 from .config import PhotometryConfig
+from .depth import (
+    depth_results_to_meta,
+    estimate_depths,
+    format_depth_table,
+    zeropoints_to_meta,
+)
 from .filters import DEFAULT_BANDS, get_filter_definitions
 from .images import (
     build_coverage_mask,
@@ -232,6 +238,13 @@ def run_photometry(
     # --- Diagnostics (override config) ---
     save_residual_plots: bool | None = None,
     plot_axiscolor: str | None = None,
+    # --- Depth estimation (override config) ---
+    estimate_depth: bool | None = None,
+    depth_n_sigma: float | None = None,
+    depth_apertures: Sequence[str] | None = None,
+    depth_n_empty_apertures: int | None = None,
+    depth_empty_aperture: bool | None = None,
+    depth_seed: int | None = None,
 ) -> PhotometryResult:
     """Run the full photometry pipeline for one image set.
 
@@ -309,6 +322,13 @@ def run_photometry(
         Calibration overrides.
     save_residual_plots, plot_axiscolor
         Diagnostic overrides.
+    estimate_depth, depth_n_sigma, depth_apertures,
+    depth_n_empty_apertures, depth_empty_aperture, depth_seed
+        Depth-estimation overrides. When ``estimate_depth`` is ``True``
+        (default), both the error-curve fit and the empty-aperture method
+        are run for the apertures listed in ``depth_apertures`` (default
+        ``('aper5',)``); results are written to the log, the manifest, and
+        the FITS catalog header (``D<N>...`` / ``E<N>...`` keys).
 
     Returns
     -------
@@ -445,7 +465,51 @@ def run_photometry(
         plot_title_extra=run_name,
     )
 
+    # Persist constant ZP + scatter as FITS-safe header keys
+    # (e.g. ZP05MG, ZE05MG, ZP10M575).
+    zeropoints_to_meta(
+        cat.meta,
+        cat.meta.get("zeropoints"),
+        cat.meta.get("zeropoint_scatter"),
+    )
+
+    depth_results: dict = {}
+    if cfg.estimate_depth:
+        depth_apertures = [a for a in cfg.depth_apertures if a in cfg.apertures]
+        if not depth_apertures:
+            depth_apertures = list(cfg.apertures)
+        zeropoints = cat.meta.get("zeropoints")
+        band_to_image = dict(zip(band_names, sciimgs))
+        depth_results = estimate_depths(
+            cat,
+            bands=band_names,
+            apertures=depth_apertures,
+            n_sigma=cfg.depth_n_sigma,
+            pixscale_arcsec=cfg.pixscale_arcsec,
+            science_images=band_to_image,
+            coverage_mask=coverage_mask,
+            zeropoints=zeropoints,
+            n_empty_apertures=cfg.depth_n_empty_apertures,
+            seed=cfg.depth_seed,
+            do_error_curve=True,
+            do_empty_apertures=cfg.depth_empty_aperture,
+        )
+        if depth_results:
+            log.info(
+                "%d-sigma depth summary:\n%s",
+                int(round(cfg.depth_n_sigma)),
+                format_depth_table(depth_results, n_sigma=cfg.depth_n_sigma),
+            )
+            depth_results_to_meta(
+                cat.meta, depth_results, n_sigma=cfg.depth_n_sigma,
+            )
+
     strip_nonfits_units(cat)
+    # Drop dict-valued meta entries (zeropoints map etc.) that cannot survive
+    # the FITS header round-trip; keep them on the in-memory table only.
+    for _k in list(cat.meta):
+        if isinstance(cat.meta[_k], dict):
+            del cat.meta[_k]
     if standardize_catalog:
         schema = build_canonical_schema(
             bands=cfg.bands,
@@ -470,6 +534,11 @@ def run_photometry(
         "science_images": list(sciimgs),
         "config": cfg.to_dict(),
     }
+    if depth_results:
+        manifest["depths"] = {
+            f"{aper}__{band}": entry
+            for (aper, band), entry in depth_results.items()
+        }
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
 

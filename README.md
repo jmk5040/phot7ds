@@ -11,10 +11,6 @@ keeps the SE++ column layout plus calibration columns; pass
 `standardize_catalog=True` if you want the fixed canonical column order with
 placeholder columns for missing bands.
 
-The original `RIS_catalog_sepp.py` / `DELVE_DetImage.py` / `Utils_7DT.py`
-scripts have been refactored into this reusable Python package; the legacy
-files are kept in `../legacy/` for reference (with a `_260520` suffix).
-
 ## Layout
 
 ```
@@ -32,6 +28,7 @@ phot7ds/          # repository root (this package)
     ├── images.py                       # organise-by-filter, coverage-mask builder
     ├── sepp.py                         # SourceExtractor++ config, command, post-process
     ├── calibration.py                  # Gaia XP loader, NN matching, spatial ZP
+    ├── depth.py                        # 5-sigma depth (curve fit / empty-aper) + ZP header keys
     ├── diagnostics.py                  # residual-map plot
     ├── schema.py                       # canonical schema, standardize, load
     ├── pipeline.py                     # run_photometry()  ← main entry
@@ -324,6 +321,46 @@ For each `(band, aperture)`:
 
 Set `save_residual_plots=True` to drop residual maps into
 `<output_dir>/figures/` (one PNG per band/aperture).
+
+After calibration, the constant ZP and its sigma-clipped scatter are
+written to the output FITS header as `ZP<APER>M<BAND>` and
+`ZE<APER>M<BAND>` (e.g. `ZP05MG`, `ZE05M575`). Aperture tokens are `05`
+(5″), `10` (10″), `AU` (`auto`); band tokens are `G`/`R`/`I`/`Z` for
+broadband and the 3-digit central wavelength for medium bands.
+
+## 5-sigma depth
+
+`run_photometry()` estimates the 5-sigma photometric depth per band right
+after calibration. Two independent methods are computed and logged side
+by side:
+
+1. **Magnitude-error curve fit** — fits `magerr = a · exp(b · mag)` to
+   point-like, well-detected sources and returns the magnitude where
+   `magerr ≈ 1.0857/N` (= 0.217 mag for `N=5`). Pure-catalog, no I/O.
+2. **Empty-aperture sky sigma** — drops ~2000 random circular apertures
+   on each science image at positions that avoid catalog sources, takes
+   the sigma-clipped stddev of the summed aperture fluxes as `σ_aper`,
+   and reports `ZP − 2.5·log10(N · σ_aper)`. Captures correlated
+   background noise without the cost of a full background-RMS check
+   image.
+
+Results are written to:
+
+- The run **log** (formatted table side-by-side).
+- The **manifest JSON** (`*_manifest.json` -> `"depths"`).
+- The **FITS catalog header**, as 8-character keys for the canonical 5″
+  aperture:
+  - `UL{N}EM{BAND}` -- N-sigma depth from the magnitude-error curve fit
+    [mag].
+  - `UL{N}RM{BAND}` -- N-sigma depth from the empty-aperture / background
+    RMS sampling [mag].
+  - `BRMSM{BAND}`   -- the empty-aperture sky sigma in ADU, useful for
+    recomputing the limiting magnitude with an updated ZP.
+
+Tune via `depth_n_sigma`, `depth_apertures`, `depth_n_empty_apertures`,
+or `depth_seed`; turn the empty-aperture pass off with
+`depth_empty_aperture=False`, or disable depth estimation entirely with
+`estimate_depth=False`.
 
 ## Tuning SE++
 

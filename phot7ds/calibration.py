@@ -282,6 +282,13 @@ def calibrate_zeropoints(
                 ztbl[f"{aperture}_mag_err_{band}"], zperr
             )
 
+            # Record the constant ZP and its scatter so downstream code
+            # (e.g. depth estimation) can convert ADU back to magnitudes.
+            cat.meta.setdefault("zeropoints", {})[(aperture, band)] = float(zp)
+            cat.meta.setdefault("zeropoint_scatter", {})[(aperture, band)] = float(
+                zperr
+            )
+
             if plot_residuals:
                 base = f"{plot_title_extra}_{band}".strip("_")
                 for tag in (aperture, f"{aperture}c"):
