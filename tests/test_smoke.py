@@ -70,32 +70,86 @@ def test_run_photometry_requires_sepp_config_file() -> None:
 
 
 def test_normalize_catalog_path() -> None:
+    """Final catalog name is taken verbatim; no forced ``_phot.zp.fits``."""
     from phot7ds.pipeline import _normalize_catalog_path
 
     assert _normalize_catalog_path(
-        "/tmp/T01_20260512_DELVE_phot.zp.fits"
-    ).name == "T01_20260512_DELVE_phot.zp.fits"
+        "/tmp/test_zp.fits"
+    ).name == "test_zp.fits"
     assert _normalize_catalog_path(
         "/tmp/T01_20260512_DELVE"
+    ).name == "T01_20260512_DELVE.fits"
+    assert _normalize_catalog_path(
+        "/tmp/T01_20260512_DELVE_phot.zp.fits"
     ).name == "T01_20260512_DELVE_phot.zp.fits"
-    assert _normalize_catalog_path("/tmp/test.zp.fits").name == "test.zp.fits"
 
 
 def test_catalog_name_under_output_dir(tmp_path) -> None:
     from phot7ds.pipeline import _resolve_output_paths
 
-    work_dir, _, zp, _, _, run_name = _resolve_output_paths(
+    work_dir, raw, zp, _, _, run_name = _resolve_output_paths(
         output_dir=tmp_path / "out",
         catalog_path=None,
-        catalog_name="test.zp.fits",
+        catalog_name="test_zp.fits",
         run_name=None,
         detection_image="/data/det.fits",
         detection_label="DELVE",
     )
     assert work_dir == tmp_path / "out"
-    assert zp == tmp_path / "out" / "test.zp.fits"
+    assert zp == tmp_path / "out" / "test_zp.fits"
+    assert raw == tmp_path / "out" / "test_zp_raw.fits"
     assert (tmp_path / "out").is_dir()
-    assert run_name == "test"
+    assert run_name == "test_zp"
+
+    # Bare stem -> `.fits` is appended.
+    _, raw2, zp2, _, _, run_name2 = _resolve_output_paths(
+        output_dir=tmp_path / "out2",
+        catalog_path=None,
+        catalog_name="my_run",
+        run_name=None,
+        detection_image="/data/det.fits",
+        detection_label="DELVE",
+    )
+    assert zp2.name == "my_run.fits"
+    assert raw2.name == "my_run_raw.fits"
+    assert run_name2 == "my_run"
+
+
+def test_photometry_config_default_apertures() -> None:
+    """Default apertures must use the zero-padded `aper05` convention."""
+    from phot7ds import PhotometryConfig
+
+    cfg = PhotometryConfig()
+    assert cfg.apertures[0] == "aper05"
+    assert cfg.depth_apertures == ("aper05",)
+
+
+def test_detection_preset_resolution() -> None:
+    """``detection_label`` selects the SE++ tuning preset."""
+    from phot7ds import resolve_preset
+    from phot7ds.pipeline import _apply_detection_preset
+    from phot7ds.config import PhotometryConfig
+
+    delve = resolve_preset("DELVE")
+    assert delve["detection_threshold"] == 10.0
+    assert delve["auto_kron_min_radius"] == 8.0
+    seven_dt = resolve_preset("7DT")
+    assert seven_dt["detection_threshold"] == 1.5
+
+    # Unknown labels fall back to the default tuning (7DT) silently.
+    unknown = resolve_preset("nonsense")
+    assert unknown == seven_dt
+
+    # `None` fields on the merged config get filled from the preset...
+    cfg = PhotometryConfig(detection_label="DELVE")
+    merged = _apply_detection_preset(cfg, "DELVE")
+    assert merged.detection_threshold == 10.0
+    assert merged.auto_kron_min_radius == 8.0
+
+    # ... but explicit values always win.
+    cfg2 = PhotometryConfig(detection_label="DELVE", detection_threshold=3.3)
+    merged2 = _apply_detection_preset(cfg2, "DELVE")
+    assert merged2.detection_threshold == 3.3
 
 
 def test_photometry_config_replace_and_to_dict() -> None:
@@ -112,14 +166,19 @@ def test_photometry_config_replace_and_to_dict() -> None:
     assert d["sepp_config_file"] == "/tmp/f.config"
 
 
-def test_run_photometry_kwargs_override_config(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_photometry_kwargs_override_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
     """An explicit kwarg on ``run_photometry`` must win over ``config``."""
     import phot7ds.pipeline as pipeline
+    from astropy.io import fits as _fits
 
-    captured: dict = {}
+    det = tmp_path / "det.fits"
+    _fits.PrimaryHDU(data=np.ones((4, 4), dtype=np.float32)).writeto(
+        str(det), overwrite=True
+    )
 
-    def fake_run(**kwargs):  # noqa: ANN003
-        captured.update(kwargs)
+    def fake_run(*args, **kwargs):  # noqa: ANN001, ANN003
         raise RuntimeError("short-circuit")
 
     monkeypatch.setattr(pipeline, "run_sepp", fake_run)
@@ -132,9 +191,9 @@ def test_run_photometry_kwargs_override_config(monkeypatch: pytest.MonkeyPatch) 
     with pytest.raises(RuntimeError):
         pipeline.run_photometry(
             science_images=[],
-            detection_image=__file__,  # not opened before short-circuit
+            detection_image=str(det),
             reference_catalog="/tmp/r.csv",
-            output_dir="/tmp/phot7ds_test_out",
+            output_dir=str(tmp_path / "out"),
             config=cfg,
             detection_threshold=99.0,
         )
@@ -153,6 +212,10 @@ def test_deg_to_hms_dms() -> None:
     assert ra_str == "05:13:59.10"
     assert dec_str == "-61:58:52.08"
 
+    # Carry-over: 219.9999... rounds up but must not produce ":60.00".
+    ra_str2, _ = deg_to_hms_dms(219.99999, 0.0)
+    assert ra_str2 == "14:40:00.00"
+
 
 def test_resolve_swarp_center_from_tile_table() -> None:
     from phot7ds.detection.delve import _resolve_swarp_center
@@ -163,6 +226,128 @@ def test_resolve_swarp_center_from_tile_table() -> None:
     ra_str, dec_str = _resolve_swarp_center(tile_info, None, None)
     assert ra_str == "14:40:00.00"
     assert dec_str == "-39:54:20.52"
+
+
+def test_aperture_label_zero_padded(tmp_path) -> None:
+    """Aperture column labels are always zero-padded (``aper05``)."""
+    from phot7ds.sepp import split_array_columns_to_per_filter
+
+    cat = Table(
+        {
+            "aper_g_mag": np.array([[18.0, 17.5], [19.0, 18.5]]),
+            "aper_g_mag_err": np.array([[0.1, 0.2], [0.3, 0.4]]),
+        }
+    )
+    path = tmp_path / "aper.fits"
+    cat.write(str(path), format="fits", overwrite=True)
+    out = split_array_columns_to_per_filter(
+        str(path),
+        band_names=["g"],
+        fixed_apertures=[5, 10],
+        overwrite=False,
+    )
+    assert out is not None
+    assert "aper05_mag_g" in out.colnames
+    assert "aper10_mag_g" in out.colnames
+    assert "aper5_mag_g" not in out.colnames
+
+
+def test_build_coverage_mask_records_mskratio_comment(tmp_path) -> None:
+    """The MSKRATIO FITS keyword carries a description comment."""
+    from astropy.io import fits
+
+    from phot7ds.images import build_coverage_mask
+
+    det = tmp_path / "det.fits"
+    sci = tmp_path / "sci.fits"
+    data_det = np.ones((20, 20), dtype=np.float32)
+    data_det[0:2, :] = 0  # 10 % zero-pixel slab
+    data_sci = np.ones_like(data_det)
+    fits.PrimaryHDU(data=data_det).writeto(str(det), overwrite=True)
+    fits.PrimaryHDU(data=data_sci).writeto(str(sci), overwrite=True)
+
+    out_mask = tmp_path / "mask.fits"
+    _, ratio = build_coverage_mask(
+        detection_image=str(det),
+        science_images=[str(sci)],
+        output_path=str(out_mask),
+        max_masked_fraction=0.99,
+    )
+    assert 0.0 < ratio <= 1.0
+    with fits.open(str(out_mask)) as hdul:
+        card = hdul[0].header.cards["MSKRATIO"]
+    assert "masked" in card.comment.lower()
+
+
+def test_annotate_catalog_meta_writes_manifest_keys() -> None:
+    """The final catalog meta carries informative cards (DETIMG, MSKRATIO, ...)."""
+    from phot7ds.config import PhotometryConfig
+    from phot7ds.pipeline import _annotate_catalog_meta
+
+    cfg = PhotometryConfig(detection_label="DELVE", detection_threshold=10.0)
+    meta: dict = {}
+    _annotate_catalog_meta(
+        meta,
+        detection_image="/path/to/T06910_DELVE_DR3_IMAGE_det.fits",
+        coverage_mask="/path/to/mask.fits",
+        badpix_mask=None,
+        reference_catalog="/path/to/gaiaxp.csv",
+        science_images=["/x/img_a.fits", "/x/img_b.fits"],
+        detection_label="DELVE",
+        mask_ratio=0.0123,
+        cfg=cfg,
+        run_name="T06910_DELVE",
+    )
+    assert meta["DETLABEL"][0] == "DELVE"
+    assert meta["DETIMG"][0] == "T06910_DELVE_DR3_IMAGE_det.fits"
+    assert meta["MSKRATIO"][0] == 0.012
+    assert meta["NSCIIMG"][0] == 2
+    assert meta["SCIMG000"][0] == "img_a.fits"
+    assert meta["SCIMG001"][0] == "img_b.fits"
+    assert meta["REFCAT"][0] == "gaiaxp.csv"
+    assert meta["PHOTRUN"][0] == "T06910_DELVE"
+    assert meta["DETTHR"][0] == 10.0
+
+
+def test_config_io_required_files_raise(tmp_path) -> None:
+    """``require_*`` helpers raise informative errors when files are missing."""
+    from phot7ds import require_gaiaxp_reference, require_tile_table
+
+    missing = tmp_path / "nope.ascii"
+    with pytest.raises(FileNotFoundError, match="Tile table"):
+        require_tile_table(missing)
+
+    with pytest.raises(FileNotFoundError, match="Gaia XP"):
+        require_gaiaxp_reference(tmp_path, tile="T00000")
+
+
+def test_delve_retryable_http_errors() -> None:
+    """502/503/504 and connection errors are classified as retryable."""
+    import requests
+
+    from phot7ds.detection.delve import _backoff_seconds, _retryable_exception
+
+    class _Resp:
+        def __init__(self, status: int) -> None:
+            self.status_code = status
+
+    err502 = requests.HTTPError("502 bad gateway")
+    err502.response = _Resp(502)  # type: ignore[attr-defined]
+    assert _retryable_exception(err502)
+    err404 = requests.HTTPError("404 not found")
+    err404.response = _Resp(404)  # type: ignore[attr-defined]
+    assert not _retryable_exception(err404)
+
+    assert _retryable_exception(requests.ConnectionError("reset"))
+    assert _retryable_exception(requests.Timeout("read timeout"))
+    assert _retryable_exception(RuntimeError("Bad Gateway from upstream"))
+    assert not _retryable_exception(ValueError("schema mismatch"))
+
+    # Backoff grows roughly exponentially and respects the cap.
+    short = _backoff_seconds(1, base=2.0, cap=60.0)
+    long = _backoff_seconds(5, base=2.0, cap=60.0)
+    assert 1.0 <= short <= 3.0
+    assert long <= 90.0  # cap*1.5 (jitter upper bound)
 
 
 def test_canonical_schema_layout() -> None:

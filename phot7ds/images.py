@@ -219,10 +219,17 @@ def build_coverage_mask(
 
     masked_ratio = float(np.count_nonzero(maskdata) / maskdata.size)
     hdr = fits.getheader(detection_image)
-    hdr["MSKRATIO"] = round(masked_ratio, 3)
-    hdr["DETIMG"] = os.path.basename(detection_image)
+    hdr["MSKRATIO"] = (
+        round(masked_ratio, 3),
+        "Ratio of pixels masked as 1 (covered by all images)",
+    )
+    hdr["DETIMG"] = (
+        os.path.basename(detection_image), "Detection image filename"
+    )
     for j, sciimg in enumerate(science_images):
-        hdr[f"SCIMG{j:03d}"] = os.path.basename(sciimg)
+        hdr[f"SCIMG{j:03d}"] = (
+            os.path.basename(sciimg), f"Science image #{j:03d} basename"
+        )
 
     fits.PrimaryHDU(
         data=np.clip(maskdata, 0, 255).astype(np.uint8), header=hdr

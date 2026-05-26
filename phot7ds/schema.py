@@ -93,7 +93,7 @@ def build_canonical_schema(
     bands
         Filter names, e.g. ``['g', 'r', 'i', 'm400', ..., 'm875']``.
     apertures
-        Aperture names, e.g. ``['aper5', 'aper10', 'auto']``.
+        Aperture names, e.g. ``['aper05', 'aper10', 'auto']``.
     flux_fractions
         Either fractions like 0.5/0.9 or SE++ suffixes ``'50'``/``'90'``.
     """

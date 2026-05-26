@@ -17,12 +17,18 @@ placeholder columns for missing bands.
 phot7ds/          # repository root (this package)
 ├── README.md
 ├── pyproject.toml
-├── examples/example_run.py             # minimal Python example
-├── tests/test_smoke.py                 # pytest smoke tests (no SE++/network)
+├── examples/
+│   ├── example_run.py                  # end-to-end runnable example
+│   └── config/                         # SE++/SWarp configs, tile table, Gaia XP, DELVE cache
+│       ├── README.md
+│       └── column_convention.md
+├── tests/test_smoke.py                 # smoke tests (no SE++/network)
 └── phot7ds/
     ├── __init__.py
     ├── _logging.py
-    ├── config.py                       # optional PhotometryConfig (frozen dataclass)
+    ├── config.py                       # PhotometryConfig (frozen dataclass)
+    ├── config_io.py                    # ensure_* / require_* helpers
+    ├── presets.py                      # per-detection-image SE++ presets
     ├── filters.py                      # 7DS filter definitions, DEFAULT_BANDS
     ├── tile_geometry.py                # tile polygon trim
     ├── images.py                       # organise-by-filter, coverage-mask builder
@@ -88,22 +94,25 @@ result = run_photometry(
     ],
     detection_image="/data/.../detection.fits",
     reference_catalog="/data/.../gaiaxp_T01234.csv",
-    catalog_path="/data/.../catalog/7ds/T01234_20260512_DELVE_phot.zp.fits",
+    catalog_path="/data/.../catalog/7ds/T01234_20260512_DELVE.fits",
     output_dir="/data/.../results/sepp/T01234",
-    sepp_config_file="/data/data1/7DS/RIS/config/7ds_sepp.config",
-    # Any other knob can be passed inline:
+    sepp_config_file="/data/.../config/7ds_sepp.config",
+    # detection_label selects an SE++ preset (see "Tuning SE++"):
     detection_label="DELVE",
-    detection_threshold=10.0,
+    # any preset value can be overridden inline:
     fixed_apertures_arcsec=(5.0, 10.0),
     save_residual_plots=True,
     thread_count=8,
 )
 
-print(result.catalog_path)   # /data/.../out/T01234/<run_name>_phot.zp.fits
+print(result.catalog_path)   # /data/.../catalog/7ds/T01234_20260512_DELVE.fits
 print(result.manifest_path)  # JSON snapshot of the inputs + config
 print(result.log_file)
 print(result.n_sources)
 ```
+
+The raw SE++ output is written alongside the final catalog as
+`{run_name}_raw.fits`, so the two are easy to tell apart on disk.
 
 Required keyword arguments:
 
@@ -113,20 +122,25 @@ Required keyword arguments:
 4. `sepp_config_file` — SourceExtractor++ `--config-file` path.
 5. `output_dir` — working directory (created automatically if missing).
 6. Name the final catalog with **either**:
-   - `catalog_name` — basename only, written inside `output_dir` (typical):
+   - `catalog_name` — basename only, written inside `output_dir` (typical).
+     The leaf is kept **verbatim** (no forced `_phot.zp.fits` suffix);
+     `.fits` is appended when missing:
 
 ```python
 run_photometry(
     ...,
     output_dir="/data/.../results/sepp/T01234",
-    catalog_name=f"{tile}_{date}_DELVE_phot.zp.fits",  # -> output_dir/<that name>
+    catalog_name="test_zp.fits",       # -> output_dir/test_zp.fits
+    # or simply:                       # -> output_dir/T01234_run01.fits
+    catalog_name="T01234_run01",
 )
 ```
 
-   - `catalog_path` — full path (alternative; do not pass both).
+   - `catalog_path` — full path (alternative; do not pass both). Again
+     `.fits` is appended if absent.
 
-Alternatively, omit both and use `run_name` + `output_dir` (auto names
-`{output_dir}/{run_name}_phot.zp.fits`).
+Alternatively, omit both and pair `run_name` with `output_dir`; the
+default name becomes `{output_dir}/{run_name}.fits`.
 
 See `help(phot7ds.run_photometry)` for all optional knobs.
 
@@ -362,30 +376,78 @@ or `depth_seed`; turn the empty-aperture pass off with
 `depth_empty_aperture=False`, or disable depth estimation entirely with
 `estimate_depth=False`.
 
-## Tuning SE++
+## Tuning SE++ (detection presets)
 
-The defaults in `PhotometryConfig` are conservative. For a **DELVE**
-detection image, the deeper / sharper imagery calls for aggressive cuts:
+`PhotometryConfig.detection_label` selects a built-in SE++ tuning preset
+(see `phot7ds.presets`). When a tuning field is left at its default
+(`None`) on the merged config, it is filled from the preset; any value
+you set explicitly **always** wins.
+
+| Field                          | `DELVE` (default) | `7DT`    |
+| ------------------------------ | ----------------- | -------- |
+| `detection_threshold`          | `10.0`            | `1.5`    |
+| `detection_minimum_area`       | `9`               | `9`      |
+| `auto_kron_min_radius`         | `8.0`             | `3.5`    |
+| `partition_threshold_count`    | `32`              | `32`     |
+| `partition_minimum_contrast`   | `5.0e-4`          | `1.0e-5` |
 
 ```python
-PhotometryConfig(
+# DELVE detection image (defaults applied automatically)
+cfg = PhotometryConfig(
     sepp_config_file=...,
-    detection_threshold=10.0,
-    auto_kron_min_radius=8.0,
-    partition_minimum_contrast=0.0005,
+    detection_label="DELVE",
+)
+
+# 7DT detection coadd
+cfg = PhotometryConfig(
+    sepp_config_file=...,
+    detection_label="7DT",
+)
+
+# Override a single value (the rest comes from the preset):
+cfg = PhotometryConfig(
+    sepp_config_file=...,
+    detection_label="DELVE",
+    detection_threshold=8.0,
 )
 ```
 
-For a **7DT detection coadd**:
+Add a new preset by extending `phot7ds.presets.DETECTION_PRESETS`.
 
-```python
-PhotometryConfig(
-    sepp_config_file=...,
-    detection_threshold=1.0,
-    auto_kron_min_radius=3.5,
-    partition_minimum_contrast=1e-5,
-)
-```
+## FITS catalog header
+
+The final calibrated catalog carries provenance / coverage metadata in
+its primary header. Selected keys (all 8-char, no `HIERARCH`):
+
+| Key        | Meaning                                          |
+| ---------- | ------------------------------------------------ |
+| `PHOTVER`  | phot7ds package version                          |
+| `PHOTRUN`  | Run name (stem of this catalog)                  |
+| `PHOTDATE` | Catalog write timestamp (UTC, ISO-8601)          |
+| `PHOTUSR`  | Username that produced the catalog               |
+| `PHOTHOST` | Hostname that produced the catalog               |
+| `DETLABEL` | `'DELVE'` or `'7DT'`                             |
+| `DETIMG`   | Detection image basename                         |
+| `COVMASK`  | Coverage mask basename                           |
+| `BADPMASK` | Bad-pixel mask basename (if any)                 |
+| `REFCAT`   | Reference catalog basename                       |
+| `NSCIIMG`  | Number of measurement (science) images           |
+| `SCIMGNNN` | Per-image basename (`NNN` = zero-padded index)   |
+| `MSKRATIO` | Ratio of pixels masked in the coverage mask     |
+| `DETTHR`   | SE++ detection threshold (σ)                     |
+| `DETMINAR` | SE++ detection minimum area (pix)                |
+| `KRNMINR`  | SE++ auto-kron minimum radius (pix)              |
+| `PARTMINC` | SE++ partition minimum contrast                  |
+| `FIXAPER`  | Fixed apertures (arcsec, comma-separated)        |
+| `PIXSCALE` | Pixel scale (arcsec/pix)                         |
+
+Per-(aperture, band) ZP, ZP scatter and 5-σ depths follow the
+`ZP{AP}M{BND}`, `ZE{AP}M{BND}`, `UL{N}EM{BND}`, `UL{N}RM{BND}` patterns
+(see [Calibration](#calibration) and [5-sigma depth](#5-sigma-depth)).
+
+> Aperture column names use the **zero-padded** convention: `aper05_`,
+> `aper10_`, `auto_`, `autoc_`. See
+> `examples/config/column_convention.md` for the full cheat-sheet.
 
 ## Testing and examples
 
@@ -401,25 +463,43 @@ python -m pytest tests/ -v
 
 ### End-to-end example (`examples/example_run.py`)
 
-`examples/example_run.py` is a runnable script for a **full** pipeline on one
-tile: optional DELVE detection + mask build, then `run_photometry` with a
-DELVE bad-pixel mask and residual plots.
+`examples/example_run.py` is a runnable script for a **full** pipeline
+on one tile: optional DELVE detection + mask build, then
+`run_photometry` with the DELVE-built bad-pixel mask and residual plots.
 
-**Before running**, edit the path block at the top of the script for your
-machine:
+All paths are **relative to the script** so the example works without
+editing if the matching layout exists in `examples/config/`:
 
-| Variable | Purpose |
-| -------- | ------- |
-| `SEPP_CONFIG` | SourceExtractor++ config (`7ds_sepp.config`) |
-| `SWARP_CONFIG` | SWarp config (only if building DELVE images) |
-| `TILE_TABLE` | `7DT_tiles.ascii` (or `.fits`) with `tile`, `ra1`–`ra4`, `dec1`–`dec4` |
-| `REFERENCE_DIR` | Directory of `gaiaxp_dr3_synphot_{tile}.csv` files |
-| `DETECT_IMG_DIR` | Where DELVE detection / mask FITS files live or are written |
-| `science_images` | List of calibrated science FITS paths for one tile |
-| `OUTPUT_DIR` | Working directory for catalogs, logs, figures |
+```
+examples/config/
+├── 7ds_sepp.config         # SE++ defaults    (auto-generated if missing)
+├── 7ds.swarp               # SWarp defaults   (auto-generated if missing)
+├── 7DT_tiles.ascii         # tile table       (USER-supplied, required)
+├── gaiaxp/                 # Gaia XP CSVs     (USER-supplied, required)
+│   └── gaiaxp_dr3_synphot_<TILE>.csv
+└── DELVE/                  # cache for DELVE mosaics (auto-created)
+    └── <TILE>/
+        ├── <TILE>_DELVE_DR3_IMAGE_det.fits
+        └── <TILE>_DELVE_DR3_MASK_det.fits
+```
 
-Science images must have `OBJECT` (tile id), `OBJCTRA`, and `OBJCTDEC` in the
-header when building DELVE images from the script.
+The script uses the bootstrap helpers exposed from the package:
+
+```python
+from phot7ds import (
+    ensure_sepp_config,       # dumps SE++ defaults if config absent
+    ensure_swarp_config,      # dumps SWarp defaults if config absent
+    require_tile_table,       # raises FileNotFoundError when missing
+    require_gaiaxp_reference, # raises FileNotFoundError when missing
+)
+```
+
+So missing SE++/SWarp configs are produced on first run via
+`sourcextractor++ --dump-default-config` / `SWarp -dd`, while missing
+survey artefacts (tile table, Gaia XP CSVs) raise a clear error.
+
+Science images must have `OBJECT` (tile id), `OBJCTRA` and `OBJCTDEC`
+in the header when building DELVE images from the script.
 
 **Run** (from the repository root, with `sourcextractor++` on `$PATH`):
 
@@ -431,26 +511,30 @@ pip install -e .    # or: export PYTHONPATH=$PWD:$PYTHONPATH
 python examples/example_run.py
 ```
 
-By default the script calls `run_single()` (one `run_photometry` job). To try
-the batch helper instead, change the bottom of the file to `run_batch()`.
+By default the script calls `run_single()` (one `run_photometry` job).
+Switch to the batch helper by calling `run_batch()` at the bottom of
+the file.
 
 **External requirements for this example** (unlike the smoke tests):
 
 - [`sourcextractor++`](https://sextractor.readthedocs.io/) on `$PATH`
-- [`SWarp`](https://www.astromatic.net/software/swarp/) if cached DELVE images
-  are missing and the script builds them (`FORCE_BUILD_DELVE = True` forces a
-  rebuild)
-- Network access for DELVE patch download when coadds are built
-- A Gaia XP synphot CSV for the tile: `{REFERENCE_DIR}/gaiaxp_dr3_synphot_{tile}.csv`
+- [`SWarp`](https://www.astromatic.net/software/swarp/) when DELVE
+  mosaics need to be built (`FORCE_BUILD_DELVE = True` rebuilds even
+  cached coadds)
+- Network access for DELVE patch download
+- A Gaia XP synphot CSV per tile inside `examples/config/gaiaxp/`
 
 **Typical output** (under `examples/example_run/` by default):
 
 ```
-catalog : .../examples/example_run/test.zp.fits
-manifest: .../examples/example_run/test_manifest.json
-log     : .../examples/example_run/test.log
+catalog : .../examples/example_run/test_zp.fits        # the calibrated catalog
+manifest: .../examples/example_run/test_zp_manifest.json
+log     : .../examples/example_run/test_zp.log
 sources : <N>
 ```
 
-Set `standardize_catalog=True` in `run_single()` if you want the canonical
-column layout (see [Canonical output schema](#canonical-output-schema-optional)).
+The raw SE++ catalog is saved alongside as `test_zp_raw.fits`.
+
+Set `standardize_catalog=True` in `run_single()` if you want the
+canonical column layout (see
+[Canonical output schema](#canonical-output-schema-optional)).

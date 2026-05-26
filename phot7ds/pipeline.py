@@ -14,9 +14,13 @@ pass it as ``config=``; any kwarg explicitly passed to
 from __future__ import annotations
 
 import dataclasses
+import getpass
 import json
 import logging
+import platform
+import socket
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -37,6 +41,7 @@ from .images import (
     extract_band_names_and_saturation,
     organize_images_by_filter,
 )
+from .presets import PRESET_TUNING_FIELDS, resolve_preset
 from .schema import (
     build_canonical_schema,
     standardize_catalog as apply_standard_catalog,
@@ -59,8 +64,10 @@ class PhotometryResult:
     Attributes
     ----------
     catalog_path
-        Path to the standardised, zero-point-calibrated FITS catalog
-        (``*_phot.zp.fits``).
+        Path to the final zero-point-calibrated FITS catalog. The basename
+        is whatever the user supplied (only ``.fits`` is enforced); for
+        example ``test_zp.fits`` stays ``test_zp.fits``. The raw SE++
+        output is written alongside it as ``{run_name}_raw.fits``.
     manifest_path
         Path to a JSON file recording the inputs used.
     log_file
@@ -98,52 +105,49 @@ _RUN_ONLY_KWARGS = {
 def _normalize_catalog_basename(name: str) -> str:
     """Normalise a catalog *filename* (no directories).
 
+    Behaviour
+    ---------
+    * Path components in ``name`` are stripped (only the leaf is kept).
+    * If ``name`` ends in ``.fits`` it is used verbatim. The caller's
+      choice of suffix (``test_zp.fits``, ``my_run.fits``, ...) is
+      respected and **not** rewritten to ``_phot.zp.fits``.
+    * Otherwise ``name`` is treated as a stem and ``.fits`` is appended.
+
     Examples
     --------
-    ``T01_20260512_DELVE`` -> ``T01_20260512_DELVE_phot.zp.fits``
-    ``T01_20260512_DELVE_phot.zp.fits`` -> unchanged
-    ``test.zp.fits`` -> unchanged (used as the final filename)
+    ``T01_20260512_DELVE`` -> ``T01_20260512_DELVE.fits``
+    ``test_zp.fits``       -> ``test_zp.fits``
+    ``test_zp``            -> ``test_zp.fits``
     """
-    name = Path(name).name
-    if name.endswith("_phot.zp.fits"):
-        return name
-    if name.endswith(".zp.fits"):
-        return name
-    if name.endswith("_phot.fits"):
-        return name.replace("_phot.fits", "_phot.zp.fits")
-    if name.endswith(".fits"):
-        stem = name[:-5]
-        if stem.endswith("_phot"):
-            return f"{stem}.zp.fits"
-        return f"{stem}_phot.zp.fits"
-    return f"{name}_phot.zp.fits"
+    leaf = Path(name).name
+    if leaf.lower().endswith(".fits"):
+        return leaf
+    return f"{leaf}.fits"
 
 
 def _stem_from_catalog_basename(basename: str) -> str:
-    """Derive ``run_name`` stem from a normalised catalog basename."""
-    if basename.endswith("_phot.zp.fits"):
-        return basename[: -len("_phot.zp.fits")]
-    if basename.endswith(".zp.fits"):
-        return basename[: -len(".zp.fits")]
-    return Path(basename).stem
+    """Derive ``run_name`` stem from a normalised catalog basename.
+
+    Strips the ``.fits`` extension. Any earlier ``_phot.zp`` / ``.zp``
+    suffixes are kept as part of the stem so intermediate files inherit
+    the user's filename intent.
+    """
+    leaf = Path(basename).name
+    if leaf.lower().endswith(".fits"):
+        return leaf[:-5]
+    return leaf
 
 
 def _normalize_catalog_path(catalog_path: str | Path) -> Path:
     """Return the final calibrated-catalog path (full path).
 
-    Accepts a full path ending in ``_phot.zp.fits``, or a stem such as
-    ``/path/T01234_20260512_DELVE`` (``_phot.zp.fits`` is appended).
+    Accepts a path that already ends in ``.fits``, or a stem (``.fits``
+    is then appended).
     """
     p = Path(catalog_path)
-    if p.name.endswith("_phot.zp.fits"):
+    if p.name.lower().endswith(".fits"):
         return p
-    if p.name.endswith(".zp.fits"):
-        return p
-    if p.suffix == ".fits" and p.name.endswith("_phot.fits"):
-        return p.with_name(p.name.replace("_phot.fits", "_phot.zp.fits"))
-    if p.suffix == ".fits":
-        return p.with_name(f"{p.stem}_phot.zp.fits")
-    return p.parent / _normalize_catalog_basename(p.name)
+    return p.with_name(f"{p.name}.fits")
 
 
 def _resolve_output_paths(
@@ -155,7 +159,11 @@ def _resolve_output_paths(
     detection_image: str,
     detection_label: str,
 ) -> tuple[Path, Path, Path, Path, Path, str]:
-    """Return work_dir, raw_catalog, zp_catalog, log, manifest, run_name."""
+    """Return work_dir, raw_catalog, zp_catalog, log, manifest, run_name.
+
+    The raw SE++ output is written as ``{run_name}_raw.fits`` next to the
+    final calibrated catalog so the two are easy to tell apart.
+    """
     if catalog_path is not None and catalog_name is not None:
         raise ValueError("Pass only one of catalog_path or catalog_name, not both.")
 
@@ -176,17 +184,163 @@ def _resolve_output_paths(
         work_dir = Path(output_dir)
         det_base = Path(detection_image).stem
         run_name = run_name or f"{det_base}_{detection_label}"
-        zp_catalog_path = work_dir / f"{run_name}_phot.zp.fits"
+        zp_catalog_path = work_dir / f"{run_name}.fits"
     else:
         raise ValueError(
             "At least one of output_dir, catalog_name, or catalog_path is required."
         )
 
     work_dir.mkdir(parents=True, exist_ok=True)
-    raw_catalog_path = work_dir / f"{run_name}_phot.fits"
+    raw_catalog_path = work_dir / f"{run_name}_raw.fits"
     log_file = work_dir / f"{run_name}.log"
     manifest_path = work_dir / f"{run_name}_manifest.json"
     return work_dir, raw_catalog_path, zp_catalog_path, log_file, manifest_path, run_name
+
+
+def _apply_detection_preset(
+    cfg: PhotometryConfig, detection_label: str | None
+) -> PhotometryConfig:
+    """Fill any preset-controlled field that is still ``None`` on ``cfg``.
+
+    The preset chosen depends on ``detection_label`` (the configured
+    label takes precedence over the explicit argument when both exist).
+    Returns the (possibly updated) config and emits an info-level log
+    line describing the resolved values.
+    """
+    label = cfg.detection_label or detection_label
+    preset = resolve_preset(label)
+    changes: dict[str, Any] = {}
+    for field_name in PRESET_TUNING_FIELDS:
+        if getattr(cfg, field_name) is None and field_name in preset:
+            changes[field_name] = preset[field_name]
+    if changes:
+        log.info(
+            "Detection preset '%s' applied: %s",
+            (label or "default"),
+            ", ".join(f"{k}={v}" for k, v in changes.items()),
+        )
+        cfg = cfg.replace(**changes)
+    return cfg
+
+
+def _flatten_meta(prefix: str, value: Any, out: dict[str, Any]) -> None:
+    """Flatten a (nested) mapping into ``KEY = scalar`` pairs.
+
+    Used internally by :func:`_annotate_catalog_meta` to expand parts of
+    the manifest into FITS-safe header cards.
+    """
+    if isinstance(value, dict):
+        for k, v in value.items():
+            _flatten_meta(f"{prefix}_{k}".upper(), v, out)
+        return
+    if isinstance(value, (list, tuple)):
+        out[prefix.upper()] = ",".join(str(v) for v in value)
+        return
+    if value is None:
+        return
+    out[prefix.upper()] = value
+
+
+def _annotate_catalog_meta(
+    meta: dict[str, Any],
+    *,
+    detection_image: str,
+    coverage_mask: str | None,
+    badpix_mask: str | None,
+    reference_catalog: str,
+    science_images: Sequence[str],
+    detection_label: str,
+    mask_ratio: float | None,
+    cfg: PhotometryConfig,
+    run_name: str,
+) -> None:
+    """Inject high-value run-time metadata into ``meta`` (in place).
+
+    These cards land on the primary header of the final FITS catalog.
+    They are kept short (<= 8 chars, no HIERARCH) so that legacy readers
+    keep working. Values come from the same data we already write to the
+    manifest JSON.
+    """
+    # Lazy version lookup avoids a circular import.
+    try:
+        from . import __version__ as version
+    except Exception:
+        version = "unknown"
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    meta["PHOTVER"] = (str(version), "phot7ds package version")
+    meta["PHOTRUN"] = (str(run_name), "phot7ds run_name (stem of this catalog)")
+    meta["PHOTDATE"] = (now, "Catalog write timestamp [UTC]")
+    try:
+        meta["PHOTHOST"] = (socket.gethostname(), "Hostname that wrote this catalog")
+    except Exception:
+        pass
+    try:
+        meta["PHOTUSR"] = (getpass.getuser(), "Username that wrote this catalog")
+    except Exception:
+        pass
+    meta["PHOTPY"] = (platform.python_version(), "Python interpreter version")
+
+    meta["DETLABEL"] = (str(detection_label), "Detection-image type label")
+    meta["DETIMG"] = (
+        str(Path(detection_image).name), "Detection image basename"
+    )
+    if coverage_mask:
+        meta["COVMASK"] = (
+            str(Path(coverage_mask).name), "Coverage mask basename"
+        )
+    if badpix_mask:
+        meta["BADPMASK"] = (
+            str(Path(badpix_mask).name), "Bad-pixel mask basename"
+        )
+    meta["REFCAT"] = (
+        str(Path(reference_catalog).name), "Reference catalog basename"
+    )
+    meta["NSCIIMG"] = (
+        int(len(science_images)), "Number of measurement (science) images"
+    )
+    for j, img in enumerate(science_images):
+        meta[f"SCIMG{j:03d}"] = (
+            str(Path(img).name), f"Science image #{j:03d} basename"
+        )
+    if mask_ratio is not None:
+        meta["MSKRATIO"] = (
+            round(float(mask_ratio), 3),
+            "Ratio of pixels masked in coverage mask",
+        )
+
+    # Selected tuning fields (short keys, FITS-safe).
+    meta["DETTHR"] = (
+        float(cfg.detection_threshold) if cfg.detection_threshold is not None else None,
+        "SE++ detection threshold (sigma)",
+    )
+    meta["DETMINAR"] = (
+        int(cfg.detection_minimum_area) if cfg.detection_minimum_area is not None else None,
+        "SE++ detection minimum area (pix)",
+    )
+    meta["KRNMINR"] = (
+        float(cfg.auto_kron_min_radius) if cfg.auto_kron_min_radius is not None else None,
+        "SE++ auto-kron min radius (pix)",
+    )
+    meta["PARTMINC"] = (
+        float(cfg.partition_minimum_contrast)
+        if cfg.partition_minimum_contrast is not None else None,
+        "SE++ partition min contrast",
+    )
+    meta["FIXAPER"] = (
+        ",".join(f"{a:g}" for a in cfg.fixed_apertures_arcsec),
+        "Fixed apertures [arcsec]",
+    )
+    meta["PIXSCALE"] = (
+        float(cfg.pixscale_arcsec), "Pixel scale [arcsec/pix]"
+    )
+    # Drop any None-valued cards we just inserted.
+    for k in [
+        "DETTHR", "DETMINAR", "KRNMINR", "PARTMINC",
+    ]:
+        v = meta.get(k)
+        if isinstance(v, tuple) and v[0] is None:
+            del meta[k]
 
 
 def run_photometry(
@@ -266,14 +420,14 @@ def run_photometry(
         not exist (``mkdir -p``). Required when using ``catalog_name``.
     catalog_name
         Basename of the final calibrated catalog, written inside
-        ``output_dir``. Examples: ``test.zp.fits``,
-        ``T01234_20260512_DELVE``, or ``T01234_20260512_DELVE_phot.zp.fits``.
-        Path components in this string are ignored (only the filename is
-        kept).
+        ``output_dir``. Examples: ``test_zp.fits``,
+        ``T01234_20260512_DELVE.fits``, ``T01234_20260512_DELVE`` (the
+        ``.fits`` extension is appended when missing). The leaf is kept
+        verbatim -- there is no forced ``_phot.zp.fits`` suffix.
     catalog_path
-        Alternative to ``catalog_name``: full path to the final catalog.
-        Its parent directory is created if missing. Do not pass both
-        ``catalog_name`` and ``catalog_path``.
+        Alternative to ``catalog_name``: full path to the final catalog
+        (``.fits`` appended if absent). Its parent directory is created
+        if missing. Do not pass both ``catalog_name`` and ``catalog_path``.
     sepp_config_file
         Path to the SourceExtractor++ ``--config-file``. Required (either
         via this kwarg or via ``config.sepp_config_file``).
@@ -288,10 +442,11 @@ def run_photometry(
         When provided, the Gaia XP reference is trimmed to the tile polygon
         before matching.
     run_name
-        Basename stem for intermediate files (log, mask, raw catalog) when
-        ``catalog_path`` is not set. Defaults to ``{detection_stem}_{detection_label}``.
-        When ``catalog_path`` is set, defaults to the catalog stem (the part
-        before ``_phot.zp.fits``).
+        Basename stem for intermediate files (log, mask, raw catalog).
+        Defaults to ``{detection_stem}_{detection_label}`` when neither
+        ``catalog_name`` nor ``catalog_path`` is supplied, otherwise to
+        the chosen filename without its ``.fits`` extension. The raw
+        SE++ catalog is always saved as ``{run_name}_raw.fits``.
     overwrite
         If False and the final catalog already exists, the run is skipped
         and the existing files are summarised.
@@ -327,8 +482,12 @@ def run_photometry(
         Depth-estimation overrides. When ``estimate_depth`` is ``True``
         (default), both the error-curve fit and the empty-aperture method
         are run for the apertures listed in ``depth_apertures`` (default
-        ``('aper5',)``); results are written to the log, the manifest, and
-        the FITS catalog header (``D<N>...`` / ``E<N>...`` keys).
+        ``('aper05',)``); results are written to the log, the manifest, and
+        the FITS catalog header (``UL{N}EM..`` / ``UL{N}RM..`` keys).
+    detection_label
+        Label of the detection image type (``'DELVE'`` or ``'7DT'``).
+        Selects the SE++ tuning preset (see :mod:`phot7ds.presets`). Any
+        explicit override of a tuning field wins over the preset.
 
     Returns
     -------
@@ -336,6 +495,7 @@ def run_photometry(
         Paths and counts describing the outputs.
     """
     cfg = _merge_config(config=config, overrides=locals())
+    cfg = _apply_detection_preset(cfg, detection_label)
 
     if not cfg.sepp_config_file:
         raise ValueError(
@@ -373,15 +533,23 @@ def run_photometry(
             "deduplicate the input list."
         )
 
+    mask_ratio: float | None = None
     if coverage_mask is None:
         coverage_mask = str(work_dir / f"{run_name}_mask.fits")
-        coverage_mask, _ = build_coverage_mask(
+        coverage_mask, mask_ratio = build_coverage_mask(
             detection_image=detection_image,
             science_images=sciimgs,
             output_path=coverage_mask,
             overwrite=overwrite,
             max_masked_fraction=cfg.coverage_mask_max_fraction,
         )
+    else:
+        try:
+            with fits.open(coverage_mask) as hdul:
+                v = hdul[0].header.get("MSKRATIO")
+                mask_ratio = float(v) if v is not None else None
+        except Exception:
+            mask_ratio = None
 
     band_names, saturation_values = extract_band_names_and_saturation(sciimgs)
     log.info("Per-image bands: %s", band_names)
@@ -510,6 +678,18 @@ def run_photometry(
     for _k in list(cat.meta):
         if isinstance(cat.meta[_k], dict):
             del cat.meta[_k]
+    _annotate_catalog_meta(
+        cat.meta,
+        detection_image=detection_image,
+        coverage_mask=coverage_mask,
+        badpix_mask=badpix_mask,
+        reference_catalog=reference_catalog,
+        science_images=sciimgs,
+        detection_label=cfg.detection_label,
+        mask_ratio=mask_ratio,
+        cfg=cfg,
+        run_name=run_name,
+    )
     if standardize_catalog:
         schema = build_canonical_schema(
             bands=cfg.bands,
@@ -527,8 +707,11 @@ def run_photometry(
     cat.write(str(zp_catalog_path), format="fits", overwrite=True)
 
     manifest = {
+        "run_name": run_name,
         "detection_image": str(detection_image),
+        "detection_label": cfg.detection_label,
         "coverage_mask": str(coverage_mask),
+        "mask_ratio": mask_ratio,
         "badpix_mask": str(badpix_mask) if badpix_mask else None,
         "reference_catalog": str(reference_catalog),
         "science_images": list(sciimgs),

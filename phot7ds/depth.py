@@ -118,7 +118,7 @@ def depth_from_error_curve(
     band
         Band suffix in the catalog column names, e.g. ``'g'``, ``'m475'``.
     aperture
-        Aperture prefix, e.g. ``'aper5'``, ``'aper10'``, ``'auto'``. The
+        Aperture prefix, e.g. ``'aper05'``, ``'aper10'``, ``'auto'``. The
         function reads ``f"{aperture}_mag_{band}"`` and
         ``f"{aperture}_mag_err_{band}"``.
     n_sigma
@@ -440,10 +440,10 @@ def depth_from_empty_apertures(
 
 
 def _aperture_radius_pix(aperture: str, pixscale_arcsec: float) -> float | None:
-    """Map ``'aper5'`` to its radius in pixels, return ``None`` otherwise.
+    """Map ``'aper05'`` to its radius in pixels, return ``None`` otherwise.
 
     ``aper{N}`` is treated as a diameter in arcseconds. The trailing ``'c'``
-    used by spatially-corrected mag columns (``'aper5c'``) is stripped.
+    used by spatially-corrected mag columns (``'aper05c'``) is stripped.
     """
     base = aperture[:-1] if aperture.endswith("c") else aperture
     if not base.startswith("aper"):
@@ -479,7 +479,7 @@ def estimate_depths(
     bands
         Band names (as in column suffixes, e.g. ``'g'``, ``'m475'``).
     apertures
-        Aperture prefixes (e.g. ``'aper5'``, ``'aper10'``). ``'auto'`` is
+        Aperture prefixes (e.g. ``'aper05'``, ``'aper10'``). ``'auto'`` is
         only included in the error-curve method (it has no fixed radius).
     n_sigma
         Detection threshold (5 by convention).
@@ -617,7 +617,7 @@ def format_depth_table(
 # every (aperture, band) returned by the calibration step.
 
 
-_CANONICAL_DEPTH_APERTURE = "aper5"
+_CANONICAL_DEPTH_APERTURE = "aper05"
 _CANONICAL_DEPTH_APERTURE_TOKEN = "05"
 
 
@@ -645,8 +645,8 @@ def _aperture_keyword_token(aperture: str) -> str:
 
     Examples
     --------
-    ``aper5`` -> ``'05'``, ``aper10`` -> ``'10'``, ``auto`` -> ``'AU'``,
-    ``aper5c`` -> ``'05C'``, ``autoc`` -> ``'AC'``.
+    ``aper05`` -> ``'05'``, ``aper10`` -> ``'10'``, ``auto`` -> ``'AU'``,
+    ``aper05c`` -> ``'05C'``, ``autoc`` -> ``'AC'``.
     """
     if not aperture:
         return "XX"
@@ -698,7 +698,7 @@ def depth_results_to_meta(
 
     Only the canonical 5" aperture is reported (``cfg.depth_apertures`` may
     request others, but those are kept in the run log and manifest only).
-    For each ``(aper5, band)`` pair the following keys are inserted:
+    For each ``(aper05, band)`` pair the following keys are inserted:
 
     - ``UL{N}EM{BAND}`` -- N-sigma depth from the magnitude-error curve fit
       [mag].
@@ -729,7 +729,7 @@ def depth_results_to_meta(
                 continue
             key = _depth_keyword(n, marker, band)
             meta[key] = (
-                float(depth),
+                round(float(depth), 3),
                 f"{n}sig {aperture} {band} {descr} depth [mag]",
             )
         # Sky sigma in ADU (raw empty-aperture noise; useful for sanity
@@ -738,7 +738,7 @@ def depth_results_to_meta(
         sigma = empty.get("sky_sigma", float("nan"))
         if np.isfinite(sigma):
             meta[_sky_sigma_keyword(band)] = (
-                float(sigma),
+                round(float(sigma), 3),
                 f"sky sigma {aperture} {band} bkgRMS [ADU]",
             )
 
@@ -768,7 +768,7 @@ def zeropoints_to_meta(
             continue
         key_zp = _zp_keyword("ZP", aperture, band)
         meta[key_zp] = (
-            float(zp),
+            round(float(zp), 3),
             f"ZP {aperture} {band} [mag]",
         )
         ze = scatter.get((aperture, band))
@@ -776,7 +776,7 @@ def zeropoints_to_meta(
             continue
         key_ze = _zp_keyword("ZE", aperture, band)
         meta[key_ze] = (
-            float(ze),
+            round(float(ze), 3),
             f"ZP scatter {aperture} {band} [mag]",
         )
 

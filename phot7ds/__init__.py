@@ -60,6 +60,12 @@ from .calibration import (
     match_nearest,
 )
 from .config import PhotometryConfig
+from .config_io import (
+    ensure_sepp_config,
+    ensure_swarp_config,
+    require_gaiaxp_reference,
+    require_tile_table,
+)
 from .depth import (
     classical_limiting_mag,
     depth_from_empty_apertures,
@@ -78,6 +84,12 @@ from .images import (
     organize_images_by_filter,
 )
 from .pipeline import PhotometryResult, run_photometry
+from .presets import (
+    DEFAULT_TUNING,
+    DETECTION_PRESETS,
+    PRESET_TUNING_FIELDS,
+    resolve_preset,
+)
 from .schema import (
     build_canonical_schema,
     load_unified_catalog,
@@ -103,6 +115,15 @@ __all__ = [
     "batch_run",
     "BatchResult",
     "PhotometryConfig",
+    # config / preset bootstrap helpers
+    "ensure_sepp_config",
+    "ensure_swarp_config",
+    "require_tile_table",
+    "require_gaiaxp_reference",
+    "DETECTION_PRESETS",
+    "DEFAULT_TUNING",
+    "PRESET_TUNING_FIELDS",
+    "resolve_preset",
     # filters / images
     "DEFAULT_BANDS",
     "get_filter_definitions",

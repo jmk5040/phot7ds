@@ -42,7 +42,7 @@ def plot_phot_residual_map(
     gaia_mag_col
         Reference magnitude column (e.g. ``gaiaxp_mag_r``).
     mag_type
-        Magnitude column family: ``'auto'``, ``'aper5'``, ``'autoc'``, ...
+        Magnitude column family: ``'auto'``, ``'aper05'``, ``'autoc'``, ...
     mag_range
         Reference-magnitude window used to select calibration stars.
     sigma

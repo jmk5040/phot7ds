@@ -21,6 +21,10 @@ env/
 *.swp
 *~
 
+# Example config: local data dirs (symlinks on the cluster; not in git)
+examples/config/DELVE
+examples/config/gaiaxp
+
 # Example / pipeline run outputs (keep example_run.py only)
 examples/example_run/
 examples/**/*.fits

@@ -46,20 +46,24 @@ class PhotometryConfig:
 
     # --- Schema ---
     bands: tuple[str, ...] = tuple(DEFAULT_BANDS)
-    apertures: tuple[str, ...] = ("aper5", "aper10", "auto")
+    apertures: tuple[str, ...] = ("aper05", "aper10", "auto")
     detection_label: str = "DELVE"
     coverage_mask_max_fraction: float = 0.5
 
     # --- SourceExtractor++ tuning ---
-    detection_threshold: float = 1.5
-    detection_minimum_area: int = 9
-    auto_kron_min_radius: float = 3.5
+    # Fields defaulting to ``None`` are filled from the detection preset
+    # selected by ``detection_label`` (see :mod:`phot7ds.presets`). Pass an
+    # explicit value to override the preset.
+    detection_threshold: float | None = None
+    detection_minimum_area: int | None = None
+    auto_kron_min_radius: float | None = None
+    partition_threshold_count: int | None = None
+    partition_minimum_contrast: float | None = None
+    # Invariant tuning (not preset-controlled):
     auto_kron_factor: float = 2.5
     background_cell_size: int = 256
     smoothing_box_size: int = 3
-    partition_threshold_count: int = 32
     partition_minimum_area: int = 9
-    partition_minimum_contrast: float = 1e-5
     cleaning_minimum_area: int = 8
     flux_fractions: tuple[float, ...] = (0.5, 0.9)
     fixed_apertures_arcsec: tuple[float, ...] = (5.0, 10.0)
@@ -79,7 +83,7 @@ class PhotometryConfig:
     # --- Depth estimation ---
     estimate_depth: bool = True
     depth_n_sigma: float = 5.0
-    depth_apertures: tuple[str, ...] = ("aper5",)
+    depth_apertures: tuple[str, ...] = ("aper05",)
     depth_n_empty_apertures: int = 2000
     depth_empty_aperture: bool = True
     depth_seed: int = 42

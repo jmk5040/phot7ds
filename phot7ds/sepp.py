@@ -252,10 +252,11 @@ def split_array_columns_to_per_filter(
     SE++ writes some properties as array columns shaped
     ``(n_sources, n_bands[, n_extra])``. This function:
 
-    * Splits ``auto_*`` (2D) and ``flux_radius`` (3D) columns into per-band
+    *     Splits ``auto_*`` (2D) and ``flux_radius`` (3D) columns into per-band
       scalar columns, e.g. ``auto_mag_g``, ``flux_rad_50_m400``.
     * Splits the multi-aperture columns ``aper_<band>`` into per-aperture
-      columns, e.g. ``aper5_mag_g``, ``aper10_mag_g``.
+      columns, e.g. ``aper05_mag_g``, ``aper10_mag_g``. Aperture labels
+      are zero-padded to two digits.
     * Renames any remaining ``aperN_<band>_<quantity>`` to
       ``aperN_<quantity>_<band>`` so the band name is always the last token.
 
@@ -367,6 +368,21 @@ def split_array_columns_to_per_filter(
             fixed_apertures = [fixed_apertures]
         fixed_apertures = list(fixed_apertures)
 
+        def _aper_label(size: float | int | str) -> str:
+            """Return a zero-padded aperture label (``5`` -> ``"05"``)."""
+            if isinstance(size, str):
+                token = size.strip().lower().lstrip("aper")
+                if token.isdigit():
+                    return f"{int(token):02d}"
+                return token or str(size)
+            try:
+                val = float(size)
+            except (TypeError, ValueError):
+                return str(size)
+            if val.is_integer() or abs(val - round(val)) < 1e-6:
+                return f"{int(round(val)):02d}"
+            return f"{val:g}"
+
         to_split: list[tuple[str, str, str]] = []
         for col in cat.colnames:
             m = re.match(r"^aper_(.+)_(flux|flux_err|mag|mag_err|flags)$", col.lower())
@@ -380,7 +396,7 @@ def split_array_columns_to_per_filter(
             aper_labels: list[str] = []
             if len(fixed_apertures) == 1:
                 size = fixed_apertures[0]
-                label = f"{size:g}" if isinstance(size, float) else str(size)
+                label = _aper_label(size)
                 if col_data.ndim == 1:
                     split_data = col_data[:, np.newaxis]
                     aper_labels = [label]
@@ -392,20 +408,14 @@ def split_array_columns_to_per_filter(
                 fixed_apertures
             ):
                 split_data = col_data
-                aper_labels = [
-                    f"{s:g}" if isinstance(s, float) else str(s) for s in fixed_apertures
-                ]
+                aper_labels = [_aper_label(s) for s in fixed_apertures]
             elif split_data is None and col_data.ndim == 3:
                 if col_data.shape[1] == 1 and col_data.shape[2] == len(fixed_apertures):
                     split_data = col_data[:, 0, :]
-                    aper_labels = [
-                        f"{s:g}" if isinstance(s, float) else str(s) for s in fixed_apertures
-                    ]
+                    aper_labels = [_aper_label(s) for s in fixed_apertures]
                 elif col_data.shape[1] == len(fixed_apertures) and col_data.shape[2] == 1:
                     split_data = col_data[:, :, 0]
-                    aper_labels = [
-                        f"{s:g}" if isinstance(s, float) else str(s) for s in fixed_apertures
-                    ]
+                    aper_labels = [_aper_label(s) for s in fixed_apertures]
 
             if split_data is None:
                 log.warning("Could not split %s with shape %s", col_name, col_data.shape)
@@ -413,7 +423,10 @@ def split_array_columns_to_per_filter(
             for aper_idx, label in enumerate(aper_labels):
                 cat[f"aper{label}_{quantity}_{band}"] = split_data[:, aper_idx]
             cat.remove_column(col_name)
-            log.info("Split %s into %d aperture columns", col_name, len(aper_labels))
+            log.info(
+                "Split %s into %d aperture columns (labels=%s)",
+                col_name, len(aper_labels), ",".join(aper_labels),
+            )
 
     # Final pass: ensure aperN_<band>_<quantity> -> aperN_<quantity>_<band>.
     for col in list(cat.colnames):

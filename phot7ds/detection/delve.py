@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import subprocess
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from glob import glob
 from typing import Any, Iterable, Literal
@@ -28,6 +30,32 @@ log = logging.getLogger(__name__)
 
 DELVE_SIA_URL = "https://datalab.noirlab.edu/sia/delve_dr3"
 
+# HTTP statuses we consider worth a retry (transient on the server side).
+_RETRYABLE_HTTP_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
+
+
+def _retryable_exception(exc: BaseException) -> bool:
+    """Return True if ``exc`` looks like a transient network/HTTP failure."""
+    if isinstance(exc, (requests.ConnectionError, requests.Timeout)):
+        return True
+    if isinstance(exc, requests.HTTPError):
+        resp = getattr(exc, "response", None)
+        if resp is not None and resp.status_code in _RETRYABLE_HTTP_STATUSES:
+            return True
+    # Astropy / pyvo wrap server errors as plain exceptions; match by text.
+    text = str(exc).lower()
+    return any(token in text for token in (
+        "502", "503", "504", "bad gateway", "gateway timeout",
+        "service unavailable", "connection reset", "remote disconnect",
+        "temporary failure", "timed out",
+    ))
+
+
+def _backoff_seconds(attempt: int, base: float, cap: float = 60.0) -> float:
+    """Exponential backoff with jitter."""
+    delay = min(base * (2 ** max(0, attempt - 1)), cap)
+    return delay * (0.5 + random.random())
+
 
 def _get_tile_value(tile_info: Any, key: str):
     if isinstance(tile_info, Table):
@@ -37,26 +65,46 @@ def _get_tile_value(tile_info: Any, key: str):
     return tile_info[key]
 
 
+def _sexagesimal(value: float, *, hours: bool) -> tuple[int, int, float]:
+    """Convert a non-negative decimal value to (h|d, m, s) with carry.
+
+    The seconds component is rounded to 2 decimals; if the rounding pushes
+    it to 60.00 the carry propagates upwards. This avoids invalid strings
+    like ``14:39:60.00`` that earlier produced ``14:39:60.00`` instead of
+    ``14:40:00.00`` in coordinate writers.
+    """
+    assert value >= 0
+    primary = int(value)
+    minutes = int((value - primary) * 60)
+    seconds = ((value - primary) * 60 - minutes) * 60
+    seconds = round(seconds, 2)
+    if seconds >= 60.0:
+        seconds -= 60.0
+        minutes += 1
+    if minutes >= 60:
+        minutes -= 60
+        primary += 1
+    if hours and primary >= 24:
+        primary -= 24
+    return primary, minutes, seconds
+
+
 def deg_to_hms_dms(ra_deg: float, dec_deg: float) -> tuple[str, str]:
     """Convert decimal degrees to SWarp / FITS sexagesimal strings.
 
     RA is returned as ``HH:MM:SS.ss`` (hours); Dec as ``[+|-]DD:MM:SS.ss``.
-    Matches the convention used in ``Utils_7DT.deg_to_hms_dms``.
+    Matches the convention used in ``Utils_7DT.deg_to_hms_dms`` and
+    propagates seconds/minutes carry-over (so a rounded ``60.00`` second
+    component never appears in the output).
     """
     ra_deg = float(ra_deg)
     dec_deg = float(dec_deg)
 
-    ra_hours = ra_deg / 15.0
-    rh = int(ra_hours)
-    rm = int((ra_hours - rh) * 60)
-    rs = ((ra_hours - rh) * 60 - rm) * 60
+    rh, rm, rs = _sexagesimal(ra_deg / 15.0, hours=True)
     ra_str = f"{rh:02d}:{rm:02d}:{rs:05.2f}"
 
     sign = "+" if dec_deg >= 0 else "-"
-    dec_abs = abs(dec_deg)
-    dd = int(dec_abs)
-    dm = int((dec_abs - dd) * 60)
-    ds = ((dec_abs - dd) * 60 - dm) * 60
+    dd, dm, ds = _sexagesimal(abs(dec_deg), hours=False)
     dec_str = f"{sign}{dd:02d}:{dm:02d}:{ds:05.2f}"
 
     return ra_str, dec_str
@@ -134,7 +182,9 @@ def build_delve_detection_image(
     image_size_y: int = 6800,
     cleanup_patches: bool = True,
     request_timeout: float = 120,
-    max_retries: int = 3,
+    max_retries: int = 5,
+    retry_backoff_sec: float = 2.0,
+    min_patch_fraction: float = 0.6,
 ) -> tuple[str, str]:
     """Build a DELVE detection (or mask) mosaic for one tile.
 
@@ -175,6 +225,16 @@ def build_delve_detection_image(
         Read timeout (seconds) for the per-patch HTTP download.
     max_retries
         Retry attempts per patch on transient SIA / HTTP failures.
+        Retries use exponential backoff with jitter (see
+        ``retry_backoff_sec``); only transient errors are retried (502,
+        503, 504, 429, connection / timeout). Non-retryable errors fail
+        the patch immediately.
+    retry_backoff_sec
+        Base of the exponential backoff between retries (seconds).
+    min_patch_fraction
+        Minimum fraction of patches that must download successfully
+        before SWarp is run. If fewer succeed, :class:`RuntimeError` is
+        raised so partial mosaics do not silently fall through.
 
     Returns
     -------
@@ -202,6 +262,7 @@ def build_delve_detection_image(
 
     def _query_and_download(args: tuple[int, float, float]) -> tuple[int, str, bool]:
         patch_idx, ra, dec = args
+        last_error: str = "Patch download failed after retries"
         for attempt in range(1, max_retries + 1):
             try:
                 sia_service, http_session = _clients()
@@ -241,10 +302,17 @@ def build_delve_detection_image(
                             f.write(chunk)
                 return patch_idx, os.path.basename(patch_img), True
             except Exception as exc:
-                if attempt == max_retries:
-                    return patch_idx, f"Patch download failed: {exc}", False
+                last_error = f"{type(exc).__name__}: {exc}"
+                if attempt == max_retries or not _retryable_exception(exc):
+                    return patch_idx, f"Patch download failed: {last_error}", False
+                delay = _backoff_seconds(attempt, retry_backoff_sec)
+                log.warning(
+                    "[%s] patch %02d attempt %d/%d failed (%s); retry in %.1fs",
+                    tile, patch_idx, attempt, max_retries, last_error, delay,
+                )
+                time.sleep(delay)
                 continue
-        return patch_idx, "Patch download failed after retries", False
+        return patch_idx, last_error, False
 
     tasks = [(idx, ra, dec) for idx, (ra, dec) in enumerate(centers, 1)]
     n_workers = max(1, min(ncores, n_patches))
@@ -256,9 +324,11 @@ def build_delve_detection_image(
         for future in as_completed(futures):
             idx = futures[future]
             _, message, success = future.result()
-            log.info("[%s] patch %d/%d: %s", tile, idx, n_patches, message)
             if success:
+                log.info("[%s] patch %d/%d OK: %s", tile, idx, n_patches, message)
                 n_success += 1
+            else:
+                log.warning("[%s] patch %d/%d FAIL: %s", tile, idx, n_patches, message)
 
     log.info("[%s] patch download summary: %d/%d", tile, n_success, n_patches)
 
@@ -269,6 +339,15 @@ def build_delve_detection_image(
     )
     if not patch_imgs:
         raise RuntimeError(f"[{tile}] no patch images downloaded")
+
+    min_required = max(1, int(min_patch_fraction * n_patches))
+    if len(patch_imgs) < min_required:
+        raise RuntimeError(
+            f"[{tile}] only {len(patch_imgs)}/{n_patches} patches downloaded "
+            f"(< {min_patch_fraction*100:.0f}%); aborting before SWarp to avoid "
+            "a partial mosaic. Re-run when the SIA service is more stable, "
+            "lower ncores, or raise max_retries / lower min_patch_fraction."
+        )
 
     exptime = 0.0
     gain = 0.0
@@ -328,9 +407,16 @@ def build_delve_detection_image(
         for img in patch_imgs:
             if os.path.exists(img):
                 os.remove(img)
-    # clean the list file and weight file
-    os.remove(list_file)
-    os.remove(f"{output_path}/{tile}_DELVE_DR3_{imgtype.upper()}_det_weight.fits")
+    # Clean the list file and (unused) weight file. Both may be absent on
+    # an unusual SWarp run; treat the missing case as benign.
+    for stale in (
+        list_file,
+        f"{output_path}/{tile}_DELVE_DR3_{imgtype.upper()}_det_weight.fits",
+    ):
+        try:
+            os.remove(stale)
+        except FileNotFoundError:
+            pass
 
     return detection_img, detection_wgt
 
