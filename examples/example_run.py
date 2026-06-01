@@ -63,14 +63,15 @@ OUTPUT_DIR = _HERE / "example_run"             # photometry outputs
 
 # Set True to rebuild DELVE even when a cached coadd already exists.
 FORCE_BUILD_DELVE = False
+
 # Set True to rebuild the catalog even when a cached one already exists.
 FORCE_BUILD_CATALOG = True
 
-# Worker counts: photometry CPU is fine to run hot; DELVE SIA downloads
-# are gentler with fewer concurrent connections because the NOIRLab
-# service occasionally throws 502s under heavy fan-out.
+# Set the detection threshold for the DELVE detection image (otherwise using default configuration based on the detection label)
+DETECTION_THRESHOLD = 10.0
+
+# Worker counts: for photometry and DELVE SIA downloads
 NCORES = 12
-DELVE_NCORES = 6
 
 # Bootstrap the SE++ / SWarp configs on the first run.
 SEPP_CONFIG = ensure_sepp_config(SEPP_CONFIG)
@@ -132,7 +133,7 @@ else:
         imgtype="image",
         output_path=f"{DETECT_IMG_DIR}/{tile}",
         swarp_cfg_path=str(SWARP_CONFIG),
-        ncores=DELVE_NCORES,
+        ncores=NCORES,
         max_retries=5,
     )
     detection_mask, _mask_weight = build_delve_detection_image(
@@ -140,7 +141,7 @@ else:
         imgtype="mask",
         output_path=f"{DETECT_IMG_DIR}/{tile}",
         swarp_cfg_path=str(SWARP_CONFIG),
-        ncores=DELVE_NCORES,
+        ncores=NCORES,
         max_retries=5,
     )
     print(f"Built DELVE detection image: {detection_image}")
@@ -183,6 +184,7 @@ def run_single() -> None:
         thread_count=EXAMPLE["thread_count"],
         overwrite=FORCE_BUILD_CATALOG,
         standardize_catalog=False,
+        detection_threshold=DETECTION_THRESHOLD,
     )
     print(f"catalog : {result.catalog_path}")
     print(f"manifest: {result.manifest_path}")

@@ -165,19 +165,33 @@ def extract_band_names_and_saturation(
     return band_names, saturation_values
 
 
+def _primary_data_shape(image_path: str) -> tuple[int, ...]:
+    """Return the primary-HDU pixel shape ``(ny, nx)`` without loading data."""
+    with fits.open(image_path, memmap=True) as hdul:
+        return tuple(hdul[0].data.shape)
+
+
 def build_coverage_mask(
     detection_image: str,
     science_images: Sequence[str],
     output_path: str,
     overwrite: bool = False,
     max_masked_fraction: float = 0.5,
-) -> tuple[str, float]:
+) -> tuple[str | None, float | None]:
     """Build a coverage mask flagging zero-valued pixels.
 
     The output mask is the union (sum, clipped to ``uint8``) of:
 
     * zero pixels in the detection image,
     * zero pixels in each science image.
+
+    Because the mask is a pixel-wise union, it is only meaningful when the
+    detection image and every science image share the same array shape (the
+    7DS standard coadd grid). When any science image has a different shape
+    -- e.g. unstandardised single-frame images -- the mask is **skipped**
+    rather than raising: the function logs a warning and returns
+    ``(None, None)``. Photometry then proceeds without a coverage flag image
+    (SE++ still aligns measurement images by WCS).
 
     Parameters
     ----------
@@ -195,15 +209,36 @@ def build_coverage_mask(
     Returns
     -------
     output_path
-        Path to the mask FITS file.
+        Path to the mask FITS file, or ``None`` when the mask was skipped
+        because of a shape mismatch.
     masked_ratio
-        Fraction of pixels that ended up flagged.
+        Fraction of pixels that ended up flagged, or ``None`` when skipped.
     """
     if not overwrite and os.path.exists(output_path):
         with fits.open(output_path) as hdul:
             ratio = float(hdul[0].header.get("MSKRATIO", np.nan))
         log.info("Coverage mask exists, reusing: %s", output_path)
         return output_path, ratio
+
+    det_shape = _primary_data_shape(detection_image)
+
+    # Shape-compatibility guard: skip (don't fail) when images are not on the
+    # common detection grid, so non-standard inputs still get a catalog.
+    mismatched: list[tuple[str, tuple[int, ...]]] = []
+    for sciimg in science_images:
+        sci_shape = _primary_data_shape(sciimg)
+        if sci_shape != det_shape:
+            mismatched.append((sciimg, sci_shape))
+    if mismatched:
+        sample = mismatched[0]
+        log.warning(
+            "Skipping coverage mask: %d/%d science image(s) do not match the "
+            "detection grid %s (e.g. %s has shape %s). Photometry will run "
+            "without a coverage flag image.",
+            len(mismatched), len(list(science_images)), det_shape,
+            os.path.basename(sample[0]), sample[1],
+        )
+        return None, None
 
     with fits.open(detection_image, memmap=True) as hdul_det:
         det_data = hdul_det[0].data

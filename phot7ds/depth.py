@@ -24,16 +24,44 @@ from __future__ import annotations
 
 import logging
 import os
+import warnings
 from typing import Mapping, Sequence
 
 import numpy as np
 from astropy.io import fits
 from astropy.stats import sigma_clipped_stats
 from astropy.table import Table
+from astropy.wcs import WCS
 from scipy.optimize import curve_fit
 from scipy.spatial import cKDTree
 
 log = logging.getLogger(__name__)
+
+
+def _sky_to_pixel(
+    header: fits.Header, ra: np.ndarray, dec: np.ndarray
+) -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
+    """Convert source sky coords to 0-based pixel coords on ``header``'s WCS.
+
+    Returns ``(x, y)`` arrays (0-based, matching numpy indexing) or
+    ``(None, None)`` if the header carries no usable celestial WCS. This is
+    what makes the empty-aperture sky sigma valid when the science image is
+    *not* on the detection grid (e.g. single-frame inputs): each image's own
+    WCS maps the shared source catalog onto its native pixel frame.
+    """
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            wcs = WCS(header)
+            if not wcs.has_celestial:
+                return None, None
+            x, y = wcs.all_world2pix(
+                np.asarray(ra, dtype=float), np.asarray(dec, dtype=float), 0
+            )
+        return np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning("WCS sky->pixel conversion failed: %s", exc)
+        return None, None
 
 
 # 1 magnitude = 1.0857 mag at SNR=1 (Pogson). Used to convert N-sigma to
@@ -242,6 +270,8 @@ def empty_aperture_sky_sigma(
     image_path: str,
     aperture_radius_pix: float,
     *,
+    source_ra: np.ndarray | None = None,
+    source_dec: np.ndarray | None = None,
     source_x: np.ndarray | None = None,
     source_y: np.ndarray | None = None,
     exclusion_radius_pix: float | None = None,
@@ -264,10 +294,19 @@ def empty_aperture_sky_sigma(
         Path to the FITS science image. Read into memory once (mmap).
     aperture_radius_pix
         Aperture radius in pixels.
+    source_ra, source_dec
+        Sky coordinates (deg) of catalog sources to avoid. **Preferred**:
+        they are converted to pixel positions using *this image's* WCS, so
+        source exclusion is correct even when the science image is not on
+        the detection grid (e.g. single-frame inputs). Falls back to
+        ``source_x``/``source_y`` if the image has no usable WCS.
     source_x, source_y
-        Pixel coordinates of catalog sources to avoid. If ``None``, no
-        source rejection is performed (the sigma clipping will still
-        suppress stars that fall inside an aperture, but exclusion is
+        Pixel coordinates of catalog sources to avoid, used only when
+        ``source_ra``/``source_dec`` are not given or WCS is unavailable.
+        These are valid only when the source positions were measured on the
+        same pixel grid as ``image_path``. If ``None`` and no sky coords are
+        given, no source rejection is performed (sigma clipping still
+        suppresses stars that fall inside an aperture, but exclusion is
         cleaner).
     exclusion_radius_pix
         Minimum distance from any source. Defaults to
@@ -302,19 +341,32 @@ def empty_aperture_sky_sigma(
 
     with fits.open(image_path, memmap=True) as hdul:
         data = np.asarray(hdul[0].data, dtype=np.float32)
+        header = hdul[0].header
 
     ny, nx = data.shape
 
     if exclusion_radius_pix is None:
         exclusion_radius_pix = 2.5 * float(aperture_radius_pix)
 
-    tree = None
-    if source_x is not None and source_y is not None:
+    # Resolve source positions on THIS image's pixel grid. Prefer a WCS
+    # transform of the shared sky coords; fall back to raw pixel coords only
+    # when no WCS is available (same-grid assumption).
+    sx = sy = None
+    if source_ra is not None and source_dec is not None:
+        sx, sy = _sky_to_pixel(header, source_ra, source_dec)
+    if sx is None and source_x is not None and source_y is not None:
         sx = np.asarray(source_x, dtype=float)
         sy = np.asarray(source_y, dtype=float)
+
+    tree = None
+    if sx is not None and sy is not None:
+        # Keep only sources that land inside the image footprint (with a
+        # small margin) so the KDTree query stays meaningful.
         finite = np.isfinite(sx) & np.isfinite(sy)
-        if finite.any():
-            tree = cKDTree(np.column_stack([sx[finite], sy[finite]]))
+        inframe = finite & (sx >= 0) & (sx < nx) & (sy >= 0) & (sy < ny)
+        use = inframe if inframe.any() else finite
+        if use.any():
+            tree = cKDTree(np.column_stack([sx[use], sy[use]]))
 
     covmask: np.ndarray | None = None
     if coverage_mask is not None:
@@ -400,6 +452,8 @@ def depth_from_empty_apertures(
     zeropoint: float,
     *,
     n_sigma: float = 5.0,
+    source_ra: np.ndarray | None = None,
+    source_dec: np.ndarray | None = None,
     source_x: np.ndarray | None = None,
     source_y: np.ndarray | None = None,
     exclusion_radius_pix: float | None = None,
@@ -411,10 +465,15 @@ def depth_from_empty_apertures(
 
     Returns the empty-aperture sigma fields plus ``depth``,
     ``zeropoint``, ``aperture_radius_pix`` and ``n_sigma`` for traceability.
+    Source positions are taken from ``source_ra``/``source_dec`` (converted
+    via the image WCS) when available, otherwise from ``source_x``/
+    ``source_y``.
     """
     stats = empty_aperture_sky_sigma(
         image_path,
         aperture_radius_pix,
+        source_ra=source_ra,
+        source_dec=source_dec,
         source_x=source_x,
         source_y=source_y,
         exclusion_radius_pix=exclusion_radius_pix,
@@ -489,7 +548,10 @@ def estimate_depths(
     science_images
         Mapping ``{band: image_path}``. If provided together with
         ``zeropoints``, the empty-aperture method runs for each
-        ``(band, aperture)``.
+        ``(band, aperture)``. Source exclusion uses each image's own WCS to
+        project the catalog sky coordinates onto its native pixel grid, so
+        the method is valid even when science images are not on the
+        detection grid (e.g. single-frame inputs).
     coverage_mask
         Optional coverage mask path/array shared by all bands.
     zeropoints
@@ -512,6 +574,17 @@ def estimate_depths(
     """
     results: dict[tuple[str, str], dict[str, float | int | str]] = {}
 
+    # Sky coords are the robust source-exclusion reference: each science
+    # image converts them to its own pixel grid via WCS. Pixel centroids are
+    # kept only as a same-grid fallback when an image lacks a usable WCS.
+    source_ra = (
+        np.asarray(cat["world_centroid_alpha"], dtype=float)
+        if "world_centroid_alpha" in cat.colnames else None
+    )
+    source_dec = (
+        np.asarray(cat["world_centroid_delta"], dtype=float)
+        if "world_centroid_delta" in cat.colnames else None
+    )
     source_x = (
         np.asarray(cat["pixel_centroid_x"], dtype=float)
         if "pixel_centroid_x" in cat.colnames else None
@@ -541,6 +614,8 @@ def estimate_depths(
                         aperture_radius_pix=radius_pix,
                         zeropoint=float(zp),
                         n_sigma=n_sigma,
+                        source_ra=source_ra,
+                        source_dec=source_dec,
                         source_x=source_x,
                         source_y=source_y,
                         coverage_mask=coverage_mask,

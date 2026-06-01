@@ -535,14 +535,17 @@ def run_photometry(
 
     mask_ratio: float | None = None
     if coverage_mask is None:
-        coverage_mask = str(work_dir / f"{run_name}_mask.fits")
         coverage_mask, mask_ratio = build_coverage_mask(
             detection_image=detection_image,
             science_images=sciimgs,
-            output_path=coverage_mask,
+            output_path=str(work_dir / f"{run_name}_mask.fits"),
             overwrite=overwrite,
             max_masked_fraction=cfg.coverage_mask_max_fraction,
         )
+        # build_coverage_mask returns (None, None) when the images are not on
+        # the common detection grid; the pipeline then runs without a mask.
+        if coverage_mask is None:
+            log.info("No coverage mask used for this run (shape mismatch).")
     else:
         try:
             with fits.open(coverage_mask) as hdul:
@@ -710,7 +713,7 @@ def run_photometry(
         "run_name": run_name,
         "detection_image": str(detection_image),
         "detection_label": cfg.detection_label,
-        "coverage_mask": str(coverage_mask),
+        "coverage_mask": str(coverage_mask) if coverage_mask else None,
         "mask_ratio": mask_ratio,
         "badpix_mask": str(badpix_mask) if badpix_mask else None,
         "reference_catalog": str(reference_catalog),

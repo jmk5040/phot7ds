@@ -279,6 +279,33 @@ def test_build_coverage_mask_records_mskratio_comment(tmp_path) -> None:
     assert "masked" in card.comment.lower()
 
 
+def test_build_coverage_mask_skips_on_shape_mismatch(tmp_path) -> None:
+    """A non-standard science-image shape skips the mask (returns None)."""
+    from astropy.io import fits
+
+    from phot7ds.images import build_coverage_mask
+
+    det = tmp_path / "det.fits"
+    sci = tmp_path / "sci.fits"
+    fits.PrimaryHDU(
+        data=np.ones((20, 30), dtype=np.float32)
+    ).writeto(str(det), overwrite=True)
+    # Different shape -> not on the detection grid.
+    fits.PrimaryHDU(
+        data=np.ones((15, 25), dtype=np.float32)
+    ).writeto(str(sci), overwrite=True)
+
+    out_mask = tmp_path / "mask.fits"
+    path, ratio = build_coverage_mask(
+        detection_image=str(det),
+        science_images=[str(sci)],
+        output_path=str(out_mask),
+    )
+    assert path is None
+    assert ratio is None
+    assert not out_mask.exists()
+
+
 def test_annotate_catalog_meta_writes_manifest_keys() -> None:
     """The final catalog meta carries informative cards (DETIMG, MSKRATIO, ...)."""
     from phot7ds.config import PhotometryConfig
