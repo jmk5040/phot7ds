@@ -55,14 +55,8 @@ from phot7ds.detection import (  # noqa: E402
     build_delve_detection_image,
 )
 
-# --- Repo-relative paths (override on demand) ------------------------------
-CONFIG_DIR = _HERE / "config"
-SEPP_CONFIG = CONFIG_DIR / "7ds_sepp.config"   # auto-created if missing
-SWARP_CONFIG = CONFIG_DIR / "7ds.swarp"        # auto-created if missing
-TILE_TABLE = CONFIG_DIR / "7DT_tiles.ascii"    # USER-supplied, must exist
-REFERENCE_DIR = CONFIG_DIR / "gaiaxp"          # USER-supplied Gaia XP CSVs
-OUTPUT_DIR = _HERE / "example_run"             # photometry outputs
-
+# ``*_coadd.fits`` science images plus ``*_coadd_weight.fits`` weight maps.
+tile = "T00138"
 # Detection image source:
 #   "DELVE" -> download a DELVE-DR3 mosaic + bad-pixel mask for the tile.
 #   "7DS"   -> stack the tile's local single-band coadds into a white image.
@@ -74,14 +68,20 @@ elif DETECTION_SOURCE == "7DS":
     DETECT_IMG_DIR = "/data/data2/RIS/data"          # output dir for detection mosaics
 else:
     raise ValueError(f"Unknown DETECTION_SOURCE: {DETECTION_SOURCE!r}")
-# For DETECTION_SOURCE == "7DS": directory holding this tile's per-band
-# ``*_coadd.fits`` science images plus ``*_coadd_weight.fits`` weight maps.
-tile = "T00238"
 # Output catalog name: leaf only; saved under OUTPUT_DIR (created if missing).
 # Whatever you pass here is preserved verbatim (no `_phot.zp.fits` rename).
 catalog_name = f"{tile}_{DETECTION_SOURCE}_phot.fits"
 
+# --- Repo-relative paths (override on demand) ------------------------------
+CONFIG_DIR = _HERE / "config"
+SEPP_CONFIG = CONFIG_DIR / "7ds_sepp.config"   # auto-created if missing
+SWARP_CONFIG = CONFIG_DIR / "7ds.swarp"        # auto-created if missing
+TILE_TABLE = CONFIG_DIR / "7DT_tiles.ascii"    # USER-supplied, must exist
+REFERENCE_DIR = CONFIG_DIR / "gaiaxp"          # USER-supplied Gaia XP CSVs
+OUTPUT_DIR = _HERE / f"example_run_{tile}"             # photometry outputs
 SEVENDS_IMAGE_DIR = f"/data/data2/RIS/data/{tile}"
+
+# For DETECTION_SOURCE == "7DS": directory holding this tile's per-band
 # Stack medium bands only (skip g/r/i) when building the 7DS white image.
 SEVENDS_MEDIUM_ONLY = True
 # Keep one representative (sharpest-seeing) image per band instead of

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "phot7ds"
-version = "0.3.1"
+version = "0.4.0"
 description = "Multi-band photometric catalog pipeline for the 7DS survey (RIS / WFS / IMS)"
 readme = "README.md"
 license = { text = "MIT" }
@@ -30,6 +30,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
+vac = ["eazy", "sfdmap", "extinction"]
 
 [project.urls]
 Homepage = "https://github.com/jmk5040/phot7ds"

@@ -1,0 +1,113 @@
+"""
+Smoke tests for the ``phot7ds.vac`` subpackage.
+
+These avoid the heavy optional dependencies (``eazy``, ``sfdmap``,
+``extinction``) and the FAST++ binary. They cover the ported helpers
+(:func:`phot7ds.matching`, :func:`phot7ds.mag_to_flux`,
+:func:`phot7ds.filter_colorization`) and :class:`VACConfig` validation.
+"""
+from __future__ import annotations
+
+import numpy as np
+import pytest
+from astropy.table import Table
+
+
+# --- ported core helpers ------------------------------------------------
+def test_matching_join_modes() -> None:
+    from phot7ds import matching
+
+    a = Table({"id": [1, 2, 3], "ra": [10.0, 20.0, 30.0], "dec": [0.0, 0.0, 0.0]})
+    b = Table({"name": ["x", "y"], "RA": [10.00001, 20.00001], "DE": [0.0, 0.0]})
+
+    inner = matching(a, b, a["ra"], a["dec"], b["RA"], b["DE"],
+                     sep=2.0, join_type="inner", duplicate="closest", ref_prefix="ref_")
+    assert len(inner) == 2
+
+    left = matching(a, b, a["ra"], a["dec"], b["RA"], b["DE"],
+                    sep=2.0, join_type="left", duplicate="closest", ref_prefix="ref_")
+    assert len(left) == 3
+    assert "ref_sep" in left.colnames
+    assert int(np.sum(np.isfinite(left["ref_sep"].filled(np.nan)))) == 2
+
+
+def test_matching_all_duplicate() -> None:
+    from phot7ds import matching
+
+    a = Table({"id": [1], "ra": [10.0], "dec": [0.0]})
+    b = Table({"name": ["x", "y"], "RA": [10.00001, 10.00002], "DE": [0.0, 0.0]})
+    allpairs = matching(a, b, a["ra"], a["dec"], b["RA"], b["DE"],
+                        sep=2.0, join_type="inner", duplicate="all", ref_prefix="ref_")
+    assert len(allpairs) == 2
+
+
+def test_mag_to_flux_edge_cases() -> None:
+    from phot7ds import AB2Jy, mag_to_flux, mag_to_flux_err
+
+    fluxes = mag_to_flux([20.0, 99.0, -5.0])
+    assert fluxes[0] == pytest.approx(AB2Jy(20.0, "FAST"), rel=1e-3)
+    assert fluxes[1] == -99  # out of (5, 30) range
+    assert fluxes[2] == -99
+
+    errs = mag_to_flux_err([20.0, 99.0], [0.1, 0.1])
+    assert errs[0] > 0
+    assert errs[1] == -99
+
+    masked = mag_to_flux(np.ma.array([20.0], mask=[True]))
+    assert masked[0] == -99
+
+
+def test_filter_colorization_bands() -> None:
+    from phot7ds import filter_colorization
+
+    bands, widths, colors, l2c, l2b = filter_colorization(unit="angstrom")
+    assert len(bands) == 23  # g, r, i + 20 medium
+    assert "g" in bands and "m400" in bands and "m875" in bands
+    assert set(bands) == set(widths) == set(colors)
+
+
+# --- VACConfig ----------------------------------------------------------
+def test_vacconfig_filters_toggle() -> None:
+    from phot7ds.vac import VACConfig
+
+    cfg = VACConfig(lib_dir="/tmp/lib", catalog_dir="/tmp/cat", output_root="/tmp/out",
+                    use_medium=True, use_broad=False, use_vhs=True, use_galex=True)
+    filters = cfg.filters()
+    assert "f_7DS_m400" in filters
+    assert "f_FUV" in filters and "f_NUV" in filters
+    assert "f_VHS_J" in filters
+    assert all(not f.startswith("f_SDSS") for f in filters)
+
+    cfg2 = VACConfig(lib_dir="/tmp/lib", catalog_dir="/tmp/cat", output_root="/tmp/out",
+                     use_medium=False, use_broad=True, use_vhs=False, use_galex=False)
+    assert cfg2.filters() == ["f_SDSS_g", "f_SDSS_r", "f_SDSS_i", "f_W1", "f_W2"]
+
+
+def test_vacconfig_validate_missing(tmp_path) -> None:
+    from phot7ds.vac import VACConfig
+
+    cfg = VACConfig(lib_dir=str(tmp_path / "nope"),
+                    catalog_dir=str(tmp_path), output_root=str(tmp_path))
+    with pytest.raises(FileNotFoundError):
+        cfg.validate(require_fastpp=False)
+
+
+def test_vacconfig_derived_paths() -> None:
+    from phot7ds.vac import VACConfig
+
+    cfg = VACConfig(lib_dir="/lib", catalog_dir="/cat", output_root="/out",
+                    detection_ref="DELVE")
+    assert str(cfg.sfd_path) == "/lib/sfddata"
+    assert str(cfg.filters_res) == "/lib/FILTER.RES.latest"
+    assert str(cfg.photoz_dir("T1")) == "/out/eazy/T1"
+    assert str(cfg.regalade_path("T1")).endswith("T1_regalade.fits")
+
+
+# --- lazy import surface ------------------------------------------------
+def test_vac_import_does_not_require_extras() -> None:
+    import importlib
+
+    mod = importlib.import_module("phot7ds.vac")
+    assert hasattr(mod, "run_value_added")
+    assert hasattr(mod, "VACConfig")
+    assert hasattr(mod, "build_galaxy_catalog")

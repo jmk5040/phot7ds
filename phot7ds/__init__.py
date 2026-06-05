@@ -60,6 +60,15 @@ from .calibration import (
     match_nearest,
 )
 from .config import PhotometryConfig
+from .crossmatch import matching
+from .photconv import (
+    AB2Jy,
+    eAB2Jy,
+    filter_colorization,
+    mag_to_flux,
+    mag_to_flux_err,
+    rsig,
+)
 from .config_io import (
     ensure_sepp_config,
     ensure_swarp_config,
@@ -105,7 +114,7 @@ from .sepp import (
 )
 from .tile_geometry import trim_to_tile_polygon
 
-__version__ = "0.3.1"
+__version__ = "0.4.0"
 
 __all__ = [
     "__version__",
@@ -159,4 +168,12 @@ __all__ = [
     # geometry / logging
     "trim_to_tile_polygon",
     "configure_logging",
+    # cross-match / conversions (reusable, dependency-light)
+    "matching",
+    "rsig",
+    "AB2Jy",
+    "eAB2Jy",
+    "mag_to_flux",
+    "mag_to_flux_err",
+    "filter_colorization",
 ]

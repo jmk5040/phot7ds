@@ -101,7 +101,9 @@ def organize_images_by_filter(
             if not paths:
                 result[filter_name] = None
                 continue
-            paths.sort()
+            # Sort by basename (ignore directory) so dedup picks the
+            # alphabetically-first file name.
+            paths.sort(key=os.path.basename)
             if len(paths) > 1:
                 result[filter_name] = paths if keep_duplicates else paths[0]
             else:
@@ -114,7 +116,7 @@ def organize_images_by_filter(
             paths = image_filter_map.get(filter_name)
             if not paths:
                 continue
-            paths.sort()
+            paths.sort(key=os.path.basename)
             ordered.extend(paths)
         return ordered
 
