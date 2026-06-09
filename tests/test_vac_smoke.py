@@ -80,7 +80,7 @@ def test_vacconfig_filters_toggle() -> None:
 
     cfg2 = VACConfig(lib_dir="/tmp/lib", catalog_dir="/tmp/cat", output_root="/tmp/out",
                      use_medium=False, use_broad=True, use_vhs=False, use_galex=False)
-    assert cfg2.filters() == ["f_SDSS_g", "f_SDSS_r", "f_SDSS_i", "f_W1", "f_W2"]
+    assert cfg2.filters() == ["f_7DS_g", "f_7DS_r", "f_7DS_i", "f_W1", "f_W2"]
 
 
 def test_vacconfig_validate_missing(tmp_path) -> None:
@@ -111,3 +111,75 @@ def test_vac_import_does_not_require_extras() -> None:
     assert hasattr(mod, "run_value_added")
     assert hasattr(mod, "VACConfig")
     assert hasattr(mod, "build_galaxy_catalog")
+    assert hasattr(mod, "detect_filters")
+    assert hasattr(mod, "ensure_external_catalog")
+    assert hasattr(mod, "write_run_log")
+
+
+# --- new VAC behavior ---------------------------------------------------
+def test_vacconfig_prior_defaults() -> None:
+    from phot7ds.vac import VACConfig
+
+    cfg = VACConfig(lib_dir="/lib", catalog_dir="/cat", output_root="/out")
+    assert cfg.prior_band == "m625"
+    assert str(cfg.prior_path) == "/lib/templates/prior_m6250_extend.dat"
+    assert cfg.auto_download is False
+
+    cfg2 = VACConfig(lib_dir="/lib", catalog_dir="/cat", output_root="/out",
+                     prior_band="r", prior_file="/lib/templates/prior_R_extend.dat")
+    assert str(cfg2.prior_path).endswith("prior_R_extend.dat")
+
+
+def test_external_enabled_respects_toggles() -> None:
+    from phot7ds.vac import VACConfig
+    from phot7ds.vac.fluxes import _external_enabled
+
+    cfg = VACConfig(lib_dir="/lib", catalog_dir="/cat", output_root="/out",
+                    use_vhs=False, use_galex=True, use_wise=True)
+    assert _external_enabled("f_VHS_J", cfg) is False
+    assert _external_enabled("f_NUV", cfg) is True
+    assert _external_enabled("f_W1", cfg) is True
+
+
+def test_vizier_preset_mapping() -> None:
+    from phot7ds.vac.vizier import _PRESET_KEYS
+
+    assert _PRESET_KEYS["regalade"] == "regalade"
+    assert _PRESET_KEYS["vhs"] == "vhs"
+    assert _PRESET_KEYS["galex"] == "galex"
+
+
+def test_ensure_external_catalog_noop_when_present(tmp_path) -> None:
+    from phot7ds.vac import VACConfig, ensure_external_catalog
+
+    existing = tmp_path / "T1_regalade.fits"
+    existing.write_text("placeholder")
+    cfg = VACConfig(lib_dir="/lib", catalog_dir=str(tmp_path), output_root="/out",
+                    auto_download=False)
+    assert ensure_external_catalog("regalade", "T1", None, existing, cfg) is True
+
+    missing = tmp_path / "T1_vhs_dr5.fits"
+    # auto_download disabled -> stays absent, returns False (no download attempt)
+    assert ensure_external_catalog("vhs", "T1", None, missing, cfg) is False
+
+
+def test_write_run_log_contents(tmp_path) -> None:
+    from phot7ds.vac import VACConfig, write_run_log
+
+    cfg = VACConfig(lib_dir="/lib", catalog_dir="/cat", output_root=str(tmp_path),
+                    detection_ref="7DS")
+    log_path = write_run_log(
+        cfg, "T1", tmp_path / "T1_7DS_vac.log",
+        flux_info={"filters": ["f_7DS_g", "f_7DS_m625"],
+                   "lambda_c": {"f_7DS_g": 4711.0, "f_7DS_m625": 6247.0},
+                   "extinction": {"f_7DS_g": 0.12, "f_7DS_m625": 0.08},
+                   "n_input": 10, "n_pass": 8, "min_filter_fraction": 0.8,
+                   "error_margin": 0.03, "aperture": "aper05c"},
+        eazy_info={"apply_prior": True, "prior_band": "m625",
+                   "zphot_column": "z_m2", "n_targets": 8, "params": {}},
+        fastpp_info={"name_zphot": "z_m2", "n_fits": 8, "params": {}},
+    )
+    text = open(log_path).read()
+    assert "z_m2" in text
+    assert "prior_band" in text
+    assert "f_7DS_m625" in text

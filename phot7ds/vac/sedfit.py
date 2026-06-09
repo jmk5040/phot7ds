@@ -35,15 +35,17 @@ def _format_value(value) -> str:
     return f"'{text}'"
 
 
-def _write_param(cfg: VACConfig, tile: str, catalog: str, dest_dir) -> str:
-    """Write the FAST++ .param file from the LIB template + overrides."""
-    template_lines = open(cfg.fastpp_param_template).readlines()
+def _build_overrides(cfg: VACConfig, catalog: str, name_zphot: str) -> dict:
+    """FAST++ parameter overrides applied on top of the LIB template."""
+    share = cfg.fastpp_share
     overrides = {
         "CATALOG": catalog,
         "AB_ZEROPOINT": 25.0,
         "FILTERS_RES": str(cfg.filters_res),
         "FILTER_FORMAT": 1,
-        "NAME_ZPHOT": "z_phot",
+        "TEMP_ERR_FILE": str(share / "TEMPLATE_ERROR.fast.v0.2"),
+        "LIBRARY_DIR": str(cfg.fastpp_libraries) + "/",
+        "NAME_ZPHOT": name_zphot,
         "Z_MIN": cfg.z_min,
         "Z_MAX": cfg.z_max,
         "Z_STEP": cfg.z_step,
@@ -51,6 +53,13 @@ def _write_param(cfg: VACConfig, tile: str, catalog: str, dest_dir) -> str:
         "N_THREAD": cfg.n_proc,
     }
     overrides.update(cfg.fastpp_params)
+    return overrides
+
+
+def _write_param(cfg: VACConfig, tile: str, catalog: str, dest_dir,
+                 overrides: dict) -> str:
+    """Write the FAST++ .param file from the LIB template + overrides."""
+    template_lines = open(cfg.fastpp_param_template).readlines()
 
     written: set[str] = set()
     out_lines: list[str] = []
@@ -78,8 +87,17 @@ def _write_param(cfg: VACConfig, tile: str, catalog: str, dest_dir) -> str:
     return param_path
 
 
-def run_fastpp(cfg: VACConfig, tile: str) -> Table:
-    """Run FAST++ SED fitting for one tile and return the parsed ``.fout``.
+def run_fastpp(cfg: VACConfig, tile: str, *, name_zphot: str = "z_phot") -> tuple[Table, dict]:
+    """Run FAST++ SED fitting for one tile.
+
+    Parameters
+    ----------
+    name_zphot
+        Redshift column FAST++ should read from the ``.zout`` (``z_m2``
+        when an eazy prior was applied, else ``z_a``).
+
+    Returns ``(fout_table, fastpp_info)`` where ``fastpp_info`` carries the
+    applied parameter overrides for the run log.
 
     Requires the ``.cat`` and ``.zout`` written by the flux/photo-z stages
     in :meth:`VACConfig.sedfit_dir`.
@@ -98,10 +116,12 @@ def run_fastpp(cfg: VACConfig, tile: str) -> Table:
 
     # FAST++ reads the translate file as [CATALOG].translate.
     shutil.copyfile(cfg.translate_file, sedfit_dir / f"{catalog}.translate")
-    param_path = _write_param(cfg, tile, catalog, str(sedfit_dir))
+    overrides = _build_overrides(cfg, catalog, name_zphot)
+    param_path = _write_param(cfg, tile, catalog, str(sedfit_dir), overrides)
 
     cmd = [str(cfg.fastpp_bin), os.path.basename(param_path)]
-    log.info("Running FAST++: %s (cwd=%s)", " ".join(cmd), sedfit_dir)
+    log.info("Running FAST++: %s (cwd=%s, NAME_ZPHOT=%s)",
+             " ".join(cmd), sedfit_dir, name_zphot)
     proc = subprocess.run(
         cmd, cwd=str(sedfit_dir), capture_output=True, text=True
     )
@@ -116,7 +136,14 @@ def run_fastpp(cfg: VACConfig, tile: str) -> Table:
         raise FileNotFoundError(f"FAST++ produced no .fout file: {fout_path}")
     fout = ascii_io.read(fout_path, header_start=-1)
     log.info("FAST++ produced %d SED fits.", len(fout))
-    return Table(fout)
+
+    fastpp_info = {
+        "name_zphot": name_zphot,
+        "binary": str(cfg.fastpp_bin),
+        "n_fits": len(fout),
+        "params": overrides,
+    }
+    return Table(fout), fastpp_info
 
 
 __all__ = ["run_fastpp"]

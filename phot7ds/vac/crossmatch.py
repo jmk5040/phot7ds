@@ -17,6 +17,7 @@ from astropy.table import Table
 from ..crossmatch import matching
 from ..tile_geometry import trim_to_tile_polygon
 from .config import VACConfig
+from .vizier import ensure_external_catalog
 
 log = logging.getLogger(__name__)
 
@@ -52,8 +53,11 @@ def build_galaxy_catalog(
     """
     regalade_path = cfg.regalade_path(tile)
     if not os.path.exists(regalade_path):
+        ensure_external_catalog("regalade", tile, tile_info, regalade_path, cfg)
+    if not os.path.exists(regalade_path):
         raise FileNotFoundError(
-            f"REGALADE reference catalog not found for tile {tile}: {regalade_path}"
+            f"REGALADE reference catalog not found for tile {tile}: {regalade_path}. "
+            "Provide it or enable VACConfig.auto_download."
         )
     regalcat = trim_to_tile_polygon(
         tile_info,
@@ -79,15 +83,17 @@ def build_galaxy_catalog(
              len(mtbl), 100.0 * len(mtbl) / max(len(regalcat), 1))
 
     if cfg.use_vhs:
-        mtbl = _match_vhs(mtbl, cfg, tile)
+        mtbl = _match_vhs(mtbl, cfg, tile, tile_info)
     if cfg.use_galex:
-        mtbl = _match_galex(mtbl, cfg, tile)
+        mtbl = _match_galex(mtbl, cfg, tile, tile_info)
 
     return _dedup_brightest(mtbl, cfg)
 
 
-def _match_vhs(mtbl: Table, cfg: VACConfig, tile: str) -> Table:
+def _match_vhs(mtbl: Table, cfg: VACConfig, tile: str, tile_info) -> Table:
     path = cfg.vhs_path(tile)
+    if not os.path.exists(path):
+        ensure_external_catalog("vhs", tile, tile_info, path, cfg)
     if not os.path.exists(path):
         log.info("No VHS catalog for tile %s; skipping NIR bands.", tile)
         return mtbl
@@ -107,8 +113,10 @@ def _match_vhs(mtbl: Table, cfg: VACConfig, tile: str) -> Table:
     )
 
 
-def _match_galex(mtbl: Table, cfg: VACConfig, tile: str) -> Table:
+def _match_galex(mtbl: Table, cfg: VACConfig, tile: str, tile_info) -> Table:
     path = cfg.galex_path(tile)
+    if not os.path.exists(path):
+        ensure_external_catalog("galex", tile, tile_info, path, cfg)
     if not os.path.exists(path):
         log.info("No GALEX catalog for tile %s; skipping UV bands.", tile)
         return mtbl

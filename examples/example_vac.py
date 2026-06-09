@@ -36,20 +36,21 @@ from phot7ds.vac import VACConfig, run_value_added  # noqa: E402
 
 # --- user settings ------------------------------------------------------
 TILE = "T00236"
-DETECTION_REF = "DELVE"  # tag used in the catalog file names
+DETECTION_REF = "7DS"  # tag used in the catalog file names
 
 # phot7ds photometric catalog for the tile (FITS).
-CATALOG_PATH = f"/data/data1/7DS/RIS/results/phot7ds/{TILE}_{DETECTION_REF}_phot.fits"
+CATALOG_PATH = f"/data/data1/7DS/RIS/catalog/7ds/{TILE}/{TILE}_{DETECTION_REF}_phot.fits"
 
 # Tile-definition table (polygon corners + center).
 TILE_TABLE = "/data/data1/7DS/RIS/config/7DT_tiles.fits"
 
 # EAzY/FAST++ config tree and external reference catalogs.
 LIB_DIR = "/data/data1/7DS/RIS/config/LIB"
-CATALOG_DIR = "/data/data1/7DS/RIS/config/refcat"
+CATALOG_DIR = "/data/data1/7DS/RIS/catalog"
 OUTPUT_ROOT = "/data/data1/7DS/RIS/results/vac"
 FASTPP_BIN = "/home/jmkastro/fastpp/bin/fast++"
-
+# Auto-download missing external catalogs (REGALADE/VHS/GALEX) via VizieR.
+AUTO_DOWNLOAD = True
 # Toggle the heavy stages.
 DO_PHOTOZ = True
 DO_SEDFIT = True
@@ -68,10 +69,16 @@ def main() -> None:
         fastpp_bin=FASTPP_BIN,
         detection_ref=DETECTION_REF,
         aperture="aper05c",
-        use_medium=True,
-        use_broad=False,
+        # The 7DS filters that enter the fit are auto-detected from the
+        # catalog's <aperture>_mag_* columns (no use_medium/use_broad needed).
         use_vhs=True,
         use_galex=True,
+        use_wise=True,
+        # Fetch absent REGALADE/VHS/GALEX catalogs on demand.
+        auto_download=AUTO_DOWNLOAD,
+        # Default magnitude prior: 7DS m625 (prior_m6250_extend.dat). When
+        # aper05c_mag_m625 is absent the run proceeds without a prior.
+        prior_band="m625",
         n_proc=8,
     )
 
@@ -91,6 +98,7 @@ def main() -> None:
     print(f"photo-z done : {result.photoz_done}")
     print(f"SED fit done : {result.sedfit_done}")
     print(f"output       : {result.value_added_path}")
+    print(f"run log      : {result.log_path}")
 
 
 if __name__ == "__main__":

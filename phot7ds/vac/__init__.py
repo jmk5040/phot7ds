@@ -25,7 +25,9 @@ from .config import VACConfig
 
 # Lightweight, always-importable pieces.
 from .crossmatch import build_galaxy_catalog
-from .fluxes import build_flux_catalog
+from .fluxes import build_flux_catalog, detect_filters
+from .report import write_run_log
+from .vizier import ensure_external_catalog
 
 # ``pipeline`` imports photoz/sedfit lazily, so it is safe to expose here.
 from .pipeline import VACResult, run_value_added
@@ -36,4 +38,7 @@ __all__ = [
     "run_value_added",
     "build_galaxy_catalog",
     "build_flux_catalog",
+    "detect_filters",
+    "ensure_external_catalog",
+    "write_run_log",
 ]

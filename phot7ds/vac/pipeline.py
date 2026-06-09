@@ -18,6 +18,7 @@ from .catalog import assemble_value_added
 from .config import VACConfig
 from .crossmatch import build_galaxy_catalog
 from .fluxes import build_flux_catalog
+from .report import write_run_log
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ class VACResult:
     value_added_path: str | None
     photoz_done: bool
     sedfit_done: bool
+    log_path: str | None = None
 
 
 def _select_tile_row(tile_table: Table, tile: str) -> Table:
@@ -89,17 +91,21 @@ def run_value_added(
         catalog = catalog[good]
 
     galaxy_tbl = build_galaxy_catalog(catalog, tile_info, config, tile)
-    flux_tbl, id_table = build_flux_catalog(galaxy_tbl, config, tile, tile_info)
+    flux_tbl, id_table, flux_info = build_flux_catalog(galaxy_tbl, config, tile, tile_info)
 
     photoz_tbl = None
     sedfit_tbl = None
+    eazy_info: dict | None = None
+    fastpp_info: dict | None = None
     photoz_done = False
     sedfit_done = False
+    name_zphot = "z_a"  # default when no prior / no photo-z
 
     if do_photoz:
         from .photoz import run_eazy
 
-        photoz_tbl = run_eazy(config, tile)
+        photoz_tbl, eazy_info = run_eazy(config, tile)
+        name_zphot = eazy_info["zphot_column"]
         photoz_done = True
 
     if do_sedfit:
@@ -107,11 +113,25 @@ def run_value_added(
             log.warning("FAST++ needs photo-z input; enabling photo-z output usage.")
         from .sedfit import run_fastpp
 
-        sedfit_tbl = run_fastpp(config, tile)
+        sedfit_tbl, fastpp_info = run_fastpp(config, tile, name_zphot=name_zphot)
         sedfit_done = True
 
     vac_path = assemble_value_added(
         id_table, config, tile, photoz_tbl=photoz_tbl, fastpp_tbl=sedfit_tbl
+    )
+
+    log_path = write_run_log(
+        config,
+        tile,
+        config.vac_dir() / f"{tile}_{config.detection_ref}_vac.log",
+        match_info={
+            "n_galaxies_matched": len(galaxy_tbl),
+            "input_rows": len(catalog),
+        },
+        flux_info=flux_info,
+        eazy_info=eazy_info,
+        fastpp_info=fastpp_info,
+        extra={"value_added_catalog": vac_path},
     )
 
     return VACResult(
@@ -121,6 +141,7 @@ def run_value_added(
         value_added_path=vac_path,
         photoz_done=photoz_done,
         sedfit_done=sedfit_done,
+        log_path=log_path,
     )
 
 

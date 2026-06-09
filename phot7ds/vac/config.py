@@ -43,7 +43,16 @@ class VACConfig:
     cover_flag_column
         Column flagging bad coverage; rows with non-zero values are dropped.
     medium_bands, broad_bands
-        Band lists; ``use_medium``/``use_broad`` toggle inclusion.
+        Legacy band lists. The 7DS filters that enter the fit are now
+        auto-detected from the catalog's ``<aperture>_mag_*`` columns, so
+        ``use_medium`` / ``use_broad`` are ignored (kept for back-compat).
+        ``medium_bands`` is still used to pick the dedup reference band.
+    auto_download
+        When True, fetch absent REGALADE/VHS/GALEX catalogs via VizieR
+        (``vizier_query_path``) before matching.
+    prior_band, prior_file
+        Magnitude-prior band (default ``m625``) and prior table (default
+        ``templates/prior_m6250_extend.dat``).
     match_radius_arcsec
         Cross-match radius for all reference catalogs.
     error_margin
@@ -63,6 +72,8 @@ class VACConfig:
     catalog_dir: str | Path
     output_root: str | Path
     fastpp_bin: str | Path = "/home/jmkastro/fastpp/bin/fast++"
+    fastpp_share_dir: str | Path | None = None
+    fastpp_library_dir: str | Path | None = None
     sfd_dir: str | Path | None = None
 
     # Naming / catalog columns
@@ -86,13 +97,31 @@ class VACConfig:
     galex_template: str = "{tile}_galex_ais.fits"
 
     # Bands
+    #
+    # The 7DS filters that enter the SED fit are auto-detected from the
+    # catalog's ``{aperture}_mag_*`` columns (see fluxes.build_flux_catalog),
+    # so ``use_medium`` / ``use_broad`` / ``medium_bands`` / ``broad_bands``
+    # are NOT used to select 7DS bands. ``medium_bands`` is kept only as the
+    # reference list for the dedup band; ``use_*`` toggles below still gate
+    # the external-survey joins.
     medium_bands: tuple[str, ...] = DEFAULT_MEDIUM_BANDS
     broad_bands: tuple[str, ...] = DEFAULT_BROAD_BANDS
-    use_medium: bool = True
-    use_broad: bool = False
+    use_medium: bool = True  # deprecated: kept for back-compat, ignored
+    use_broad: bool = False  # deprecated: kept for back-compat, ignored
     use_vhs: bool = True
     use_galex: bool = True
     use_wise: bool = True  # WISE bands come bundled in the REGALADE columns
+
+    # External-catalog auto-download (VizieR). When a per-tile reference
+    # catalog is absent at its expected path and ``auto_download`` is True,
+    # it is fetched via the Query/Vizier_Query.py helper before matching.
+    auto_download: bool = False
+    vizier_query_path: str | Path = "/data/data1/7DS/RIS/script/Query/Vizier_Query.py"
+
+    # Magnitude prior (eazy). Default is the 7DS m625 prior; when the prior
+    # band's flux is absent the run proceeds without a prior (see photoz.py).
+    prior_band: str = "m625"
+    prior_file: str | Path | None = None  # default: templates/prior_m6250_extend.dat
 
     # Matching / flux assembly
     match_radius_arcsec: float = 2.0
@@ -106,7 +135,14 @@ class VACConfig:
     z_step: float = 0.001
 
     # Execution
-    n_proc: int = 8
+    n_proc: int = 8  # FAST++ threads (and default object count is small)
+    # eazy-py parallelism. Its TemplateGrid (n_proc<0 == serial) and
+    # fit_catalog (n_proc==0 == serial) use *inconsistent* conventions, and
+    # the multiprocessing template-grid build is prone to fork deadlocks
+    # (it hangs then raises multiprocessing TimeoutError). Default <=0 runs
+    # both stages serially, which is robust and fast for the small VAC
+    # catalogs. Set >0 only if you know the parallel build works for you.
+    eazy_n_proc: int = -1
     eazy_params: dict[str, Any] = field(default_factory=dict)
     fastpp_params: dict[str, Any] = field(default_factory=dict)
 
@@ -122,6 +158,29 @@ class VACConfig:
         return Path(self.sfd_dir) if self.sfd_dir else self.lib_path / "sfddata"
 
     @property
+    def fastpp_share(self) -> Path:
+        """FAST++ ``share`` tree (template error fn + SPS libraries).
+
+        Defaults to ``<fastpp_bin>/../../share`` (the standard install
+        layout) when not set explicitly.
+        """
+        if self.fastpp_share_dir:
+            return Path(self.fastpp_share_dir)
+        return Path(self.fastpp_bin).resolve().parent.parent / "share"
+
+    @property
+    def fastpp_libraries(self) -> Path:
+        """BC03/SPS ``ised`` library tree for FAST++.
+
+        Defaults to ``{lib_dir}/Libraries`` (where the 7DS config tree keeps
+        the Bruzual & Charlot models) rather than the FAST++ install share,
+        which is often left empty.
+        """
+        if self.fastpp_library_dir:
+            return Path(self.fastpp_library_dir)
+        return self.lib_path / "Libraries"
+
+    @property
     def filters_res(self) -> Path:
         return self.lib_path / "FILTER.RES.latest"
 
@@ -132,6 +191,13 @@ class VACConfig:
     @property
     def translate_file(self) -> Path:
         return self.lib_path / "default.translate"
+
+    @property
+    def prior_path(self) -> Path:
+        """eazy magnitude-prior file (default: 7DS m625 prior)."""
+        if self.prior_file:
+            return Path(self.prior_file)
+        return self.lib_path / "templates" / "prior_m6250_extend.dat"
 
     @property
     def eazy_param_template(self) -> Path:
@@ -149,7 +215,7 @@ class VACConfig:
         if self.use_medium:
             names += [f"f_7DS_{b}" for b in self.medium_bands]
         if self.use_broad:
-            names += [f"f_SDSS_{b}" for b in self.broad_bands]
+            names += [f"f_7DS_{b}" for b in self.broad_bands]
         if self.use_vhs:
             names += [f"f_VHS_{b}" for b in ("J", "H", "K")]
         if self.use_wise:

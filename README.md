@@ -18,11 +18,14 @@ phot7ds/          # repository root (this package)
 ├── README.md
 ├── pyproject.toml
 ├── examples/
-│   ├── example_run.py                  # end-to-end runnable example
+│   ├── example_run.py                  # end-to-end photometry example
+│   ├── example_vac.py                  # end-to-end value-added-catalog example
 │   └── config/                         # SE++/SWarp configs, tile table, Gaia XP, DELVE cache
 │       ├── README.md
 │       └── column_convention.md
-├── tests/test_smoke.py                 # smoke tests (no SE++/network)
+├── tests/
+│   ├── test_smoke.py                   # smoke tests (no SE++/network)
+│   └── test_vac_smoke.py               # vac smoke tests (no eazy/sfdmap/FAST++)
 └── phot7ds/
     ├── __init__.py
     ├── _logging.py
@@ -37,10 +40,23 @@ phot7ds/          # repository root (this package)
     ├── depth.py                        # 5-sigma depth (curve fit / empty-aper) + ZP header keys
     ├── diagnostics.py                  # residual-map plot
     ├── schema.py                       # canonical schema, standardize, load
+    ├── crossmatch.py                   # sky cross-matching (matching())
+    ├── photconv.py                     # mag/flux conversions, filter colorization
     ├── pipeline.py                     # run_photometry()  ← main entry
     ├── batch.py                        # batch_run(jobs=[...])
-    └── detection/
-        └── delve.py                    # DELVE patch download + SWarp coadd
+    ├── detection/
+    │   ├── delve.py                    # DELVE patch download + SWarp coadd
+    │   └── sevends.py                  # 7DS native white detection image (SWarp)
+    └── vac/                            # value-added catalog subpackage (optional extra)
+        ├── config.py                   # VACConfig (dataclass)
+        ├── vizier.py                   # on-demand external-catalog download
+        ├── crossmatch.py               # REGALADE/VHS/GALEX matching + dedup
+        ├── fluxes.py                   # auto-detect filters, extinction-corrected fluxes
+        ├── photoz.py                   # eazy-py photo-z (m625 prior, z_m2/z_a)
+        ├── sedfit.py                   # FAST++ SED fitting
+        ├── catalog.py                  # merge photo-z + SED fits
+        ├── report.py                   # per-run log file
+        └── pipeline.py                 # run_value_added()  ← VAC entry
 ```
 
 ## Installation
@@ -448,6 +464,143 @@ Per-(aperture, band) ZP, ZP scatter and 5-σ depths follow the
 > Aperture column names use the **zero-padded** convention: `aper05_`,
 > `aper10_`, `auto_`, `autoc_`. See
 > `examples/config/column_convention.md` for the full cheat-sheet.
+
+## Value-added catalog (`phot7ds.vac`)
+
+`phot7ds.vac` turns a phot7ds photometric catalog into a **value-added
+catalog**: it cross-matches galaxies against external references, builds an
+extinction-corrected flux catalog, runs photometric redshifts with
+[`eazy-py`](https://github.com/gbrammer/eazy-py), runs SED fitting with the
+compiled [`FAST++`](https://github.com/cschreib/fastpp) binary, and merges
+everything back onto the input catalog.
+
+### Installation (extra dependencies)
+
+The subpackage needs heavy optional dependencies plus the external `fast++`
+binary. The heavy imports are deferred to call time, so plain
+`import phot7ds` (and even `import phot7ds.vac`) keeps working without them;
+a clear error is raised only when a stage that needs them actually runs.
+
+```bash
+pip install -e ".[vac]"     # eazy, sfdmap2, extinction
+```
+
+You also need:
+
+- the compiled `fast++` binary (default path
+  `/home/jmkastro/fastpp/bin/fast++`, override via `VACConfig.fastpp_bin`),
+- the EAzY/FAST++ config tree under `lib_dir` (templates, `FILTER.RES.latest`,
+  `default.translate`, priors, SPS libraries),
+- SFD dust maps (default `lib_dir/sfddata`, override via `sfd_dir`).
+
+### Quick start
+
+```python
+from phot7ds.vac import VACConfig, run_value_added
+
+config = VACConfig(
+    lib_dir="/data/data1/7DS/RIS/config/LIB",
+    catalog_dir="/data/data1/7DS/RIS/catalog",
+    output_root="/data/data1/7DS/RIS/results/vac",
+    fastpp_bin="/home/jmkastro/fastpp/bin/fast++",
+    detection_ref="7DS",
+    aperture="aper05c",
+    auto_download=True,   # fetch missing REGALADE/VHS/GALEX via VizieR
+    prior_band="m625",    # default 7DS m625 magnitude prior
+    use_vhs=True, use_galex=True, use_wise=True,
+)
+
+result = run_value_added(
+    catalog_path="/data/.../T00236/T00236_7DS_phot.fits",
+    tile="T00236",
+    tile_table="/data/data1/7DS/RIS/config/7DT_tiles.fits",
+    config=config,
+    do_photoz=True,
+    do_sedfit=True,
+)
+
+print(result.value_added_path)  # merged catalog
+print(result.log_path)          # human-readable run log
+print(result.n_matched, result.n_flux)
+```
+
+A runnable version is in `examples/example_vac.py`.
+
+### Pipeline stages
+
+1. **Cross-match** (`crossmatch.py`) — match the catalog to REGALADE
+   (required; WISE `W1`/`W2` come bundled in its columns), then optionally
+   VHS (NIR, Vega→AB corrected) and GALEX (UV). Duplicate REGALADE
+   associations collapse to the brightest 7DS match.
+2. **Flux assembly** (`fluxes.py`) — build the EAzY/FAST++ `.cat`
+   (AB zeropoint 25) with Galactic-extinction correction (SFD + Fitzpatrick99
+   at the tile center).
+3. **Photo-z** (`photoz.py`) — eazy-py on the auto-detected filter set, with
+   the default m625 prior.
+4. **SED fit** (`sedfit.py`) — FAST++ for stellar mass, SFR, age, Av, ….
+5. **Merge** (`catalog.py`) — `hstack` the photo-z and SED-fit outputs onto a
+   carried-over id table and write the final FITS catalog plus a run log.
+
+### Auto-detected filter set
+
+The 7DS filters that enter the fit are read **directly from the catalog**:
+every `{aperture}_mag_<band>` column with a matching `f_7DS_<band>` entry in
+`default.translate` is used (ordered by central wavelength). External bands
+(`f_W1/f_W2`, `f_VHS_*`, `f_FUV/f_NUV`) are added when their reference columns
+are present **and** the corresponding `use_wise` / `use_vhs` / `use_galex`
+toggle is on. The legacy `use_medium` / `use_broad` toggles are ignored.
+
+### On-demand external catalogs (VizieR)
+
+With `auto_download=True`, a per-tile reference catalog that is **absent** at
+its expected path is fetched via the project's `Query/Vizier_Query.py`
+helper (path set by `vizier_query_path`) before matching. Supported keys:
+`regalade`, `vhs`, `galex`. Download failures are non-fatal for the optional
+catalogs (the run proceeds and skips those bands); a missing **REGALADE**
+catalog still raises.
+
+### Magnitude prior and the redshift column
+
+The default prior is the 7DS **m625** prior
+(`templates/prior_m6250_extend.dat`, band `m625`). When the prior band's flux
+(`f_7DS_m625`, i.e. `aper05c_mag_m625`) is present the prior is applied and
+the redshift column handed to FAST++ is **`z_m2`**; when it is absent a
+warning is logged, the run proceeds **without** a prior, and the column is
+**`z_a`**. FAST++ `NAME_ZPHOT` is pointed at whichever column is produced.
+Override with `prior_band=` / `prior_file=`.
+
+### eazy-py parallelism (`eazy_n_proc`)
+
+eazy-py's `TemplateGrid` (serial when `n_proc < 0`) and `fit_catalog`
+(serial when `n_proc == 0`) use **inconsistent** conventions, and the
+parallel template-grid build is prone to fork deadlocks (it hangs, then
+raises a multiprocessing `TimeoutError`). `VACConfig.eazy_n_proc` defaults to
+`-1`, which runs **both** stages serially — robust and fast for the small VAC
+catalogs. Set it `>0` only if the parallel build is known to work in your
+environment. (`n_proc` still controls FAST++ threads.)
+
+### Outputs
+
+```
+<output_root>/
+├── eazy/<tile>/      # EAzY .cat / zphot.param / OUTPUT/*.zout
+├── fastpp/<tile>/    # FAST++ .cat / .zout / .param / .fout
+└── value_added/
+    ├── <tile>_<ref>_value_added.fits   # merged catalog
+    └── <tile>_<ref>_vac.log            # run log
+```
+
+The run log records the timestamp, cross-match settings, the detected filter
+list with central wavelengths and extinction, target counts, the full
+eazy-py configuration (prior choice, redshift column, parallelism), and the
+full FAST++ configuration.
+
+### vac smoke tests
+
+`tests/test_vac_smoke.py` covers the lightweight pieces (matching, flux
+conversions, `VACConfig` validation/derived paths, filter auto-detection
+toggles, VizieR preset mapping, the run-log writer) without importing the
+heavy extras or invoking FAST++.
 
 ## Testing and examples
 

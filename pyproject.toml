@@ -30,7 +30,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
-vac = ["eazy", "sfdmap", "extinction"]
+vac = ["eazy", "sfdmap2", "extinction"]
 
 [project.urls]
 Homepage = "https://github.com/jmk5040/phot7ds"

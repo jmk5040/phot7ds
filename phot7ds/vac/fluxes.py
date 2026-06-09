@@ -69,15 +69,93 @@ def _central_wavelengths(cfg: VACConfig, filters: list[str]) -> dict[str, float]
     return lambda_c
 
 
+def detect_filters(magtbl: Table, cfg: VACConfig) -> list[str]:
+    """Auto-detect the EAzY filters available in the matched catalog.
+
+    7DS bands come from the ``{aperture}_mag_<band>`` columns (mapped to
+    ``f_7DS_<band>``); external bands (WISE/VHS/GALEX) come from the
+    presence of their reference magnitude columns. Only filters defined in
+    the translate file are kept. The result is wavelength-ordered.
+    """
+    translate = ascii_io.read(cfg.translate_file)
+    defined = set(np.asarray(translate["filter"]).astype(str))
+    cols = set(magtbl.colnames)
+
+    prefix = f"{cfg.aperture}_mag_"
+    detected: list[str] = []
+    for col in magtbl.colnames:
+        if col.startswith(prefix) and "_mag_err_" not in col:
+            band = col[len(prefix):]
+            fname = f"f_7DS_{band}"
+            if fname in defined:
+                detected.append(fname)
+
+    for fname, (mcol, _err) in _EXTERNAL_COLUMNS.items():
+        if mcol in cols and fname in defined and _external_enabled(fname, cfg):
+            detected.append(fname)
+
+    # Order by central wavelength for a tidy catalog.
+    lam = _central_wavelengths(cfg, detected)
+    detected = [f for f in detected if f in lam]
+    detected.sort(key=lambda f: lam[f])
+    return detected
+
+
+def _external_enabled(fname: str, cfg: VACConfig) -> bool:
+    """Respect the external-survey toggles for non-7DS filters."""
+    if fname in ("f_W1", "f_W2"):
+        return cfg.use_wise
+    if fname.startswith("f_VHS_"):
+        return cfg.use_vhs
+    if fname in ("f_FUV", "f_NUV"):
+        return cfg.use_galex
+    return True
+
+
+def _sfd_ebv(sfd_dir: str, ra: float, dec: float) -> float:
+    """E(B-V) from SFD maps, robust across sfdmap / sfdmap2 and numpy 2.x.
+
+    Prefers the maintained ``sfdmap2`` fork. Falls back to the legacy
+    ``sfdmap`` package, which uses removed numpy aliases (``np.int`` etc.)
+    under numpy >= 2; those aliases are temporarily restored only for the
+    duration of the call (numpy is left untouched afterwards).
+    """
+    _sfd = None
+    for _modname in ("sfdmap2.sfdmap", "sfdmap2", "sfdmap"):
+        try:
+            import importlib
+
+            candidate = importlib.import_module(_modname)
+        except ImportError:
+            continue
+        if hasattr(candidate, "ebv"):
+            _sfd = candidate
+            break
+    if _sfd is None:  # pragma: no cover - extras not installed
+        raise ImportError(
+            "SFD dust maps need 'sfdmap2' (recommended) or 'sfdmap'. "
+            "Install with: pip install sfdmap2"
+        )
+
+    _legacy_aliases = {"int": int, "float": float}
+    _patched = [name for name in _legacy_aliases if not hasattr(np, name)]
+    for name in _patched:
+        setattr(np, name, _legacy_aliases[name])
+    try:
+        ebv = _sfd.ebv(ra, dec, mapdir=sfd_dir)
+    finally:
+        for name in _patched:
+            delattr(np, name)
+    return float(np.atleast_1d(ebv)[0])
+
+
 def _extinction_by_filter(
     cfg: VACConfig, lambda_c: dict[str, float], ra: float, dec: float
 ) -> dict[str, float]:
     """Galactic extinction (mag) per filter at the tile center (SFD + F99)."""
     import extinction
-    import sfdmap
 
-    ebv = sfdmap.ebv(ra, dec, mapdir=str(cfg.sfd_path))
-    ebv = float(np.atleast_1d(ebv)[0])
+    ebv = _sfd_ebv(str(cfg.sfd_path), ra, dec)
     return {
         band: float(round(extinction.fitzpatrick99(np.array([lam]), 3.1 * ebv)[0], 3))
         for band, lam in lambda_c.items()
@@ -89,8 +167,13 @@ def build_flux_catalog(
     cfg: VACConfig,
     tile: str,
     tile_info,
-) -> tuple[Table, Table]:
+) -> tuple[Table, Table, dict]:
     """Build the EAzY/FAST++ flux catalog and the target-id table.
+
+    The set of 7DS filters is **auto-detected** from the catalog's
+    ``{aperture}_mag_*`` columns (the ``use_medium`` / ``use_broad`` toggles
+    are ignored); external bands are added when their reference columns are
+    present and the corresponding ``use_*`` toggle is enabled.
 
     Parameters
     ----------
@@ -105,12 +188,19 @@ def build_flux_catalog(
 
     Returns
     -------
-    (flux_table, id_table)
+    (flux_table, id_table, flux_info)
         ``flux_table`` is the cleaned EAzY/FAST++ input catalog (also
         written to both the photo-z and SED-fit directories as ``.cat``).
         ``id_table`` carries the identifiers needed to merge results back.
+        ``flux_info`` is a metadata dict for logging.
     """
-    filters = cfg.filters()
+    filters = detect_filters(magtbl, cfg)
+    if not filters:
+        raise ValueError(
+            f"No usable filters detected in catalog columns for tile {tile}. "
+            f"Expected {cfg.aperture}_mag_* columns and/or external bands."
+        )
+    log.info("Auto-detected %d filters: %s", len(filters), ", ".join(filters))
     lambda_c = _central_wavelengths(cfg, filters)
     centra, centdec = _tile_center(tile_info)
     lambda_ext = _extinction_by_filter(cfg, lambda_c, centra, centdec)
@@ -127,7 +217,7 @@ def build_flux_catalog(
         ext = lambda_ext[band]
         ecol = band.replace("f_", "e_")
         magcol = f"{aperture}_mag_{band.split('_')[-1]}"
-        if magcol in magtbl.colnames:
+        if band.startswith("f_7DS_") and magcol in magtbl.colnames:
             errcol = magcol.replace("_mag_", "_mag_err_")
             fluxtbl[band] = mag_to_flux(magtbl[magcol] - ext)
             fluxtbl[ecol] = mag_to_flux_err(magtbl[magcol], magtbl[errcol] + error_margin)
@@ -163,7 +253,18 @@ def build_flux_catalog(
     id_table.write(photoz_dir / id_name, format="fits", overwrite=True)
     id_table.write(sedfit_dir / id_name, format="fits", overwrite=True)
 
-    return clean_tbl, id_table
+    flux_info = {
+        "filters": filters,
+        "lambda_c": lambda_c,
+        "extinction": lambda_ext,
+        "ebv_center": (centra, centdec),
+        "n_input": len(magtbl),
+        "n_pass": len(clean_tbl),
+        "min_filter_fraction": cfg.min_filter_fraction,
+        "aperture": cfg.aperture,
+        "error_margin": cfg.error_margin,
+    }
+    return clean_tbl, id_table, flux_info
 
 
 def _apply_validity_cut(fluxtbl: Table, cfg: VACConfig) -> tuple[Table, np.ndarray]:
@@ -199,4 +300,4 @@ def _build_id_table(magtbl: Table, mask: np.ndarray, cfg: VACConfig) -> Table:
     return idtbl
 
 
-__all__ = ["build_flux_catalog"]
+__all__ = ["build_flux_catalog", "detect_filters"]
