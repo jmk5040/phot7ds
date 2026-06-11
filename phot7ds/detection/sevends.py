@@ -11,7 +11,10 @@ Combine modes (``combine_type``):
 * ``"WEIGHTED"`` - weighted mean -> a true "white" image (default).
 * ``"CHI-MEAN"`` - chi-mean -> optimal multi-band *detection* image for
   source finding (feeds SExtractor / SE++ directly).
-* ``"AVERAGE"`` / ``"MEDIAN"`` - unweighted alternatives.
+* ``"MEDIAN"`` - unweighted median; weight maps are neither required nor
+  used, so images without a ``*_weight.fits`` sibling are stacked too.
+* ``"AVERAGE"`` - unweighted mean (weight maps still required/used as
+  with ``"WEIGHTED"``).
 
 The output mirrors the DELVE builder's contract: it returns
 ``(detection_image, detection_weight)`` and records provenance in the
@@ -78,10 +81,10 @@ def _read_seeings(
 
 def _select_sharpest_per_band(
     images: list[str],
-    weights: list[str],
+    weights: list[str | None],
     seeing_keys: tuple[str, ...],
     n_workers: int = 1,
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str | None]]:
     """Keep one representative (sharpest-seeing) image per band.
 
     Bands whose images have no usable seeing keyword are kept in full
@@ -90,12 +93,12 @@ def _select_sharpest_per_band(
     """
     seeings = _read_seeings(images, seeing_keys, n_workers=n_workers)
 
-    by_band: dict[str, list[tuple[str, str, float | None]]] = {}
+    by_band: dict[str, list[tuple[str, str | None, float | None]]] = {}
     for img, wgt, see in zip(images, weights, seeings):
         by_band.setdefault(_band_token(img), []).append((img, wgt, see))
 
     sel_images: list[str] = []
-    sel_weights: list[str] = []
+    sel_weights: list[str | None] = []
     for band in sorted(by_band):
         entries = by_band[band]
         with_seeing = [e for e in entries if e[2] is not None]
@@ -128,13 +131,18 @@ def collect_band_inputs(
     one_per_band: bool = False,
     seeing_keys: tuple[str, ...] = DEFAULT_SEEING_KEYS,
     n_workers: int = 1,
-) -> tuple[list[str], list[str]]:
+    require_weights: bool = True,
+) -> tuple[list[str], list[str | None]]:
     """Return aligned ``(images, weights)`` path lists for a tile directory.
 
-    Only science coadds that have a sibling weight map are kept, so the
-    image/weight ordering stays consistent for SWarp. When ``medium_only``
-    is set, broad-band images (``g``/``r``/``i``) are dropped and only
-    medium bands (``m###``) are stacked.
+    With ``require_weights=True`` (default) only science coadds that have a
+    sibling weight map are kept, so the image/weight ordering stays
+    consistent for SWarp. With ``require_weights=False`` (e.g. for an
+    unweighted ``MEDIAN`` combine) images without a weight map are kept
+    too, with ``None`` in the corresponding ``weights`` slot.
+
+    When ``medium_only`` is set, broad-band images (``g``/``r``/``i``) are
+    dropped and only medium bands (``m###``) are stacked.
 
     When ``one_per_band`` is set, only a single representative image is
     kept per band: the one with the smallest (sharpest) seeing, read from
@@ -144,7 +152,7 @@ def collect_band_inputs(
     kept.
     """
     images: list[str] = []
-    weights: list[str] = []
+    weights: list[str | None] = []
     for img in sorted(glob(os.path.join(image_dir, image_glob))):
         if img.endswith(f"{weight_suffix}.fits"):
             continue  # defensive: never treat a weight map as a science image
@@ -153,8 +161,12 @@ def collect_band_inputs(
         stem, ext = os.path.splitext(img)
         wgt = f"{stem}{weight_suffix}{ext}"
         if not os.path.exists(wgt):
-            log.warning("No weight map for %s; skipping", os.path.basename(img))
-            continue
+            if require_weights:
+                log.warning("No weight map for %s; skipping", os.path.basename(img))
+                continue
+            log.info("No weight map for %s; keeping (weights not required)",
+                     os.path.basename(img))
+            wgt = None
         images.append(img)
         weights.append(wgt)
 
@@ -236,7 +248,10 @@ def build_7ds_detection_image(
         sharper). Defaults to ``("SEEING", "FWHM")``.
     combine_type
         SWarp ``COMBINE_TYPE`` (see module docstring). Default
-        ``"WEIGHTED"``.
+        ``"WEIGHTED"``. With ``"MEDIAN"`` the stack is unweighted: the
+        ``*_weight.fits`` maps are neither required nor used
+        (``WEIGHT_TYPE NONE``), so images without a weight map are
+        stacked too.
     resampling_type
         SWarp ``RESAMPLING_TYPE`` (default ``"LANCZOS3"``).
     subtract_back
@@ -266,6 +281,10 @@ def build_7ds_detection_image(
     detection_image, detection_weight
         Paths to the output FITS image and its weight map.
     """
+    # MEDIAN is an unweighted combine: weight maps are neither required
+    # (images without one are stacked too) nor passed to SWarp.
+    use_weights = combine_type.upper() != "MEDIAN"
+
     images, weights = collect_band_inputs(
         image_dir,
         image_glob=image_glob,
@@ -274,11 +293,12 @@ def build_7ds_detection_image(
         one_per_band=one_per_band,
         seeing_keys=seeing_keys,
         n_workers=seeing_workers,
+        require_weights=use_weights,
     )
     if not images:
         raise FileNotFoundError(
-            f"No image/weight pairs found in {image_dir} "
-            f"(medium_only={medium_only}, glob={image_glob!r})"
+            f"No {'image/weight pairs' if use_weights else 'images'} found in "
+            f"{image_dir} (medium_only={medium_only}, glob={image_glob!r})"
         )
 
     if tile is None:
@@ -317,8 +337,15 @@ def build_7ds_detection_image(
         "-c", swarp_cfg_path,
         "-IMAGEOUT_NAME", out_img,
         "-WEIGHTOUT_NAME", out_wgt,
-        "-WEIGHT_TYPE", "MAP_WEIGHT",
-        "-WEIGHT_IMAGE", ",".join(weights),
+    ]
+    if use_weights:
+        swarp_args += [
+            "-WEIGHT_TYPE", "MAP_WEIGHT",
+            "-WEIGHT_IMAGE", ",".join(weights),
+        ]
+    else:
+        swarp_args += ["-WEIGHT_TYPE", "NONE"]
+    swarp_args += [
         "-COMBINE", "Y",
         "-COMBINE_TYPE", combine_type,
         "-RESAMPLE", "Y",
