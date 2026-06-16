@@ -1,0 +1,202 @@
+# phot7ds — Session Context / Handoff
+
+Working memory for the `phot7ds` package and the 7DS/RIS scripts around it.
+Read this first when starting a new session. Version at time of writing:
+**phot7ds 0.4.0** (`phot7ds/__init__.py`, `pyproject.toml`).
+
+---
+
+## 1. What this is
+
+`phot7ds` is a reusable Python package (Python API only) for processing 7DS
+survey data into zero-point-calibrated photometric catalogs and value-added
+catalogs. It refactors older one-off scripts into a modular package hosted on
+GitHub. The workspace root is `/data/data1/7DS/RIS/script`; the package lives
+in the sibling `Phot7DS/` dir (`Phot7DS/phot7ds/`).
+
+## 2. Environment & how to run
+
+- Conda env: **`7dt`** → interpreter `/home/jmkastro/miniconda3/envs/7dt/bin/python`
+  (numpy 2.4.2). Always run scripts with this interpreter.
+- External binaries: **`SWarp`** at `/usr/bin/SWarp`; **FAST++** at
+  `/home/jmkastro/fastpp/bin/fast++`; SourceExtractor++ (`sourcextractor++`).
+- Set `MPLCONFIGDIR=/tmp/mpl` to avoid matplotlib cache warnings.
+- Import without install: scripts insert `/data/data1/7DS/RIS/script/Phot7DS`
+  onto `sys.path` (see `phot7ds_IMS.py`). The basedpyright "could not be
+  resolved" warning for `phot7ds` in such scripts is a false positive.
+
+### Sandbox / filesystem gotchas (IMPORTANT)
+- The agent shell runs sandboxed: **writes are only allowed inside the
+  workspace** (`/data/data1/7DS/RIS/script`). Everything else (e.g.
+  `/data/data1/7DS/IMS/DELVE`, `/data/data2/RIS/data`, `/data/data1/7DS/RIS/config`,
+  `/data/data1/7DS/RIS/catalog`) is **read-only** unless you pass
+  `required_permissions: ["all"]`.
+- Network (NOIRLab SIA, Vizier, etc.) needs `["all"]` (or `full_network`).
+- Those data dirs are often **root-owned**; the user runs as root but the
+  sandbox still blocks writes without `["all"]`.
+
+## 3. Key external paths
+
+| Purpose | Path |
+|---|---|
+| Config / LIB tree (EAzY, FILTER.RES, priors, SFD, swarp cfg) | `/data/data1/7DS/RIS/config/` and `.../config/LIB/` |
+| SWarp config | `/data/data1/7DS/RIS/config/7ds.swarp` |
+| SE++ config | `/data/data1/7DS/RIS/config/7ds_sepp.config` |
+| Tile table | `/data/data1/7DS/RIS/config/7DT_tiles.fits` (also `.ascii`) |
+| Band coverage table | `/data/data1/7DS/RIS/config/coadd_band_coverage.csv` |
+| Gaia XP reference CSVs | `/data/data1/7DS/RIS/catalog/gaiaxp/` |
+| Per-tile science coadds (+ `_weight.fits`) | `/data/data2/RIS/data/{tile}/*_coadd.fits` |
+| Output catalogs | `/data/data1/7DS/RIS/catalog/7ds/{tile}/` |
+| IMS DELVE detection images | `/data/data1/7DS/IMS/DELVE/{tile}_DELVE_DR3_{IMAGE,MASK}_det.fits` |
+
+## 4. Package layout
+
+```
+phot7ds/
+  __init__.py        # version + public API
+  config.py          # PhotometryConfig (dataclass); apertures default ("aper05", ...)
+  config_io.py       # ensure_/require_ helpers for config & reference files
+  pipeline.py        # run_photometry() — main entry; _annotate_catalog_meta()
+  batch.py           # batch_run()
+  calibration.py     # calibrate_zeropoints(), apply_spatial_zeropoint(); ZP per band×aperture
+  depth.py           # depth estimation + ZP/depth header meta; WCS-based empty-aperture sky sigma
+  images.py          # organize_images_by_filter(), build_coverage_mask() (shape-checked → (None,None))
+  sepp.py            # SE++ output parsing; aperture labels zero-padded ("05")
+  schema.py          # canonical catalog schema
+  filters.py         # 7DS filter definitions / DEFAULT_BANDS
+  presets.py         # detection-label SE++ tuning presets (PRESET_TUNING_FIELDS)
+  crossmatch.py      # matching() sky cross-match (ported from Utils_7DT)
+  photconv.py        # mag/flux conversions, filter_colorization
+  diagnostics.py     # residual map plots
+  tile_geometry.py
+  _logging.py
+  detection/
+    delve.py         # DELVE-DR3 mosaic builder + gap-fill (see §6)
+    sevends.py       # 7DS native white detection image builder
+    __init__.py
+  vac/               # value-added catalog subpackage (see §7)
+    config.py photoz.py sedfit.py fluxes.py crossmatch.py vizier.py
+    catalog.py report.py pipeline.py __init__.py
+```
+
+## 5. Photometry pipeline conventions
+
+- Entry: `run_photometry(science_images=..., detection_image=..., reference_catalog=..., ...)`.
+  Settings can be passed as kwargs or via a `PhotometryConfig` (`config=`); explicit
+  kwargs override the config.
+- Apertures use **zero-padded** labels: `aper05`, `aper10` (not `aper5`).
+- ZP calibration (`calibrate_zeropoints`) runs **once per (band × aperture)**:
+  fits a 2-D polynomial spatial ZP (`{aper}c_mag_{band}`) + a constant ZP
+  (`{aper}_mag_{band}`). This is why ZP log lines repeat per band (one per
+  aperture). The "Spatial ZP: fitting…" line prints the instrumental column
+  (`aper05_mag_m875`) to disambiguate apertures.
+- Catalog primary-header metadata is injected by `_annotate_catalog_meta()`
+  (pipeline.py). Cards are short, FITS-safe. Includes: `PHOTVER/PHOTRUN/PHOTDATE`,
+  `DETLABEL/DETIMG`, `REFCAT`, `NSCIIMG`, `SCIMG{nnn}` (basenames),
+  tuning fields (`DETTHR`, `DETMINAR`, …), `PIXSCALE`, `MSKRATIO`.
+  - **Observation dates (added 2026-06-16):** per science image
+    `DATE-{nnn}` = that image's `DATE-OBS`, paired with `SCIMG{nnn}`; plus an
+    **exposure-averaged `DATE-OBS` (ISO)** and **`MJD-OBS`** computed by
+    averaging each image's `DATE-OBS` via `astropy.time.Time` (fallback to
+    header `MJD`/`MJD-OBS`). NOTE: in 7DS coadds, header `MJD` matches
+    `DATE-OBS` while header `MJD-OBS` is offset ~0.5 d — so we average from
+    `DATE-OBS`, not `MJD-OBS`.
+- `batch_run()` / `phot7ds_IMS.py` loop tiles; per-tile errors are caught so the
+  batch continues. `phot7ds_IMS.py` builds a detection image (7DS white stack or
+  DELVE) then calls `run_photometry`.
+
+## 6. Detection images — `phot7ds.detection`
+
+### DELVE (`delve.py`)
+- `build_delve_detection_image(...)`: partitions the tile FOV into a patch grid,
+  queries NOIRLab SIA (`delve_dr3`) per patch, downloads, SWarps into one mosaic
+  (`-COMBINE_TYPE MAX`, never MEDIAN). Robust retries w/ exponential backoff.
+- **Overlap-aware auto grid:** pass `n_cols=None, n_rows=None, patch_size_deg=,
+  overlap=` to size the grid from the field span so patches overlap in
+  *coordinate* degrees. Needed at high |dec| (e.g. IMS tiles dec≈−61°,
+  cosδ≈0.48) where a fixed 9×6 grid leaves thin **RA-direction** gaps. Defaults
+  remain `9×6, overlap=0.0` (backward compatible for equatorial RIS tiles).
+- `download_delve_patches(centers, ..., all_matches=False)`: reusable threaded
+  downloader. `all_matches=True` downloads **every** overlapping brick per
+  center (deduped by URL) — needed at brick boundaries/tile edges where the
+  first-returned brick has a hole but a neighbour covers it.
+- `fill_delve_detection_gaps(image_path, ..., imgtype, coverage_reference=None,
+  overlap=0.5, max_passes=5, all_matches via internal)`: **repairs existing
+  mosaics in place**. Finds empty pixels, places query centers at the
+  **centroid of gap pixels** per bin (gaps lie on brick boundaries, so a
+  bin-center query returns the wrong brick), downloads all overlapping bricks,
+  SWarps onto the *same frame*, merges into empty pixels only. Iterates passes
+  (each pass re-targets the shrinking residual). For **science images** coverage
+  = `data!=0`; for **masks** coverage = SWarp weight>0 (a mask value of 0 is a
+  valid pixel, not "no data"). For masks, pass the sibling IMAGE as
+  `coverage_reference`.
+
+### 7DS white (`sevends.py`)
+- `build_7ds_detection_image(image_dir, ..., medium_only=, one_per_band=,
+  combine_type="WEIGHTED"|"MEDIAN")`: stacks per-band coadds into a white
+  detection image with SWarp + weight maps. `one_per_band` keeps the
+  sharpest-SEEING image per band (FWHM fallback; skip if unavailable),
+  parallelized header reads (default `n_workers=1`). Records provenance in the
+  header (`DETIMGnn`, `DETSEEnn`, `SEEMIN/MED/MAX`, `MEDONLY`, `ONEPRBND`).
+  `MEDIAN` combine does not require weight maps.
+
+### IMS work (done 2026-06-16) — `IMS_detect.py`
+- 7 IMS tiles (`T02666 T02665 T02524 T02523 T02386 T02385 T02252`),
+  output `/data/data1/7DS/IMS/DELVE/`. Filled grid-induced + brick-boundary gaps
+  to **0.0000** on all tiles. T02386's MASK had been generated as science data
+  (pre-existing bug) → regenerated from scratch as a proper mask. `IMS_detect.py`
+  gap-fills existing images (cheap) or `FULL_REGEN=True` rebuilds with the auto grid.
+
+## 7. Value-added catalog — `phot7ds.vac`
+
+- Entry: `run_value_added(...)` orchestrated in `vac/pipeline.py`; config
+  `VACConfig` (`vac/config.py`). Example: `Phot7DS/examples/example_vac.py`.
+  Install extra: `pip install -e ".[vac]"` (eazy, sfdmap2, extinction).
+- Stages: galaxy match + optional external-catalog download (REGALADE, VHS,
+  GALEX, WISE via Vizier — `vac/vizier.py`, `auto_download=True`) →
+  flux catalog (`vac/fluxes.py`, **auto-detects filters** from catalog columns,
+  no more `use_medium/use_broad`) → photo-z EAzY (`vac/photoz.py`) →
+  SED fit FAST++ (`vac/sedfit.py`) → assemble (`vac/catalog.py`) → run log
+  (`vac/report.py`).
+- Filters: broad bands use `f_7DS_g/r/i` (not `f_SDSS_*`). `FILTER.RES.latest`
+  and `default.translate` were updated by `update_7ds_filters.py`; keep the two
+  files in sync (a prior desync was missing `f_7DS_g/r/i`).
+- Prior: default `prior_m6250_extend.dat` (band m625). If prior applies →
+  redshift column `z_m2`, else `z_a`. Warn (don't fail) if `aper05c_mag_m625`
+  missing.
+- **eazy-py multiprocessing deadlock:** `VACConfig.eazy_n_proc = -1` (default)
+  forces serial `TemplateGrid` build and serial `fit_catalog` to avoid a fork
+  timeout. Don't set it positive unless you know it's safe.
+- numpy 2.x: use `sfdmap2` (or the `_sfd_ebv` shim) — legacy `sfdmap` uses
+  removed `np.int`.
+
+## 8. Conventions / gotchas summary
+
+- Sexagesimal: `delve.deg_to_hms_dms()` carries seconds/minutes correctly (no
+  `:60.00`).
+- FITS keyword cards are ≤8 chars; hyphenated keys like `DATE-OBS`, `DATE-000`
+  are valid and survive astropy `Table.write(format="fits")` with comments.
+- No `pytest` in the env; use inline runners. Smoke tests in `tests/`.
+- `build_coverage_mask` returns `(None, None)` (and logs) when science image
+  shapes don't match the detection image, instead of raising.
+- Diagnostic figures off: `save_residual_plots=False` (run_photometry) /
+  `plot_residuals=False`.
+
+## 9. Recent changes (2026-06-16)
+
+1. `detection/delve.py`: overlap-aware auto grid; reusable
+   `download_delve_patches(all_matches=)`; new `fill_delve_detection_gaps`
+   (centroid-centered queries, all-bricks, data-vs-weight coverage, multi-pass).
+   Filled all 7 IMS tiles to 0 gap; regenerated T02386 mask.
+2. `pipeline._annotate_catalog_meta`: added per-image `DATE-{nnn}` +
+   exposure-averaged `DATE-OBS` / `MJD-OBS`. Verified on T02386 (23 images).
+3. `calibration.py`: ZP "fitting" log now shows the instrumental column
+   (per-aperture clarity); pre-filter NaNs before `sigma_clipped_stats` to
+   silence repeated "invalid values" warnings.
+
+## 10. Open / possible next steps
+
+- Consider lowering `fill_delve_detection_gaps` default overlap for *full*
+  rebuilds (overlap 0.5 → 192 patches for an IMS tile; fine for gap-fill, heavy
+  for full builds).
+- `IMS_detect.py` `FULL_REGEN` path uses the auto grid; tune overlap if used.

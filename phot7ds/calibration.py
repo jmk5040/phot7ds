@@ -163,8 +163,8 @@ def apply_spatial_zeropoint(
     x_clean, y_clean, zp_clean = x[mask], y[mask], raw_zp[mask]
 
     log.info(
-        "Spatial ZP: fitting with %d/%d stars for %s",
-        len(zp_clean), len(raw_zp), mag_ref_col,
+        "Spatial ZP: fitting with %d/%d stars for %s (ref %s)",
+        len(zp_clean), len(raw_zp), mag_inst_col, mag_ref_col,
     )
 
     zp_init = models.Polynomial2D(degree=poly_degree)
@@ -273,9 +273,14 @@ def calibrate_zeropoints(
                 new_col=f"{aperture}c_mag_{band}",
             )
 
-            mag_diff = (
-                ztbl[f"{REF_PREFIX}mag_{band_ref}"] - ztbl[f"{aperture}_mag_{band}"]
+            mag_diff = np.asarray(
+                ztbl[f"{REF_PREFIX}mag_{band_ref}"] - ztbl[f"{aperture}_mag_{band}"],
+                dtype=float,
             )
+            mag_diff = mag_diff[np.isfinite(mag_diff)]
+            if mag_diff.size == 0:
+                log.info("No finite ZP residuals for band=%s aper=%s", band, aperture)
+                continue
             _, zp, zperr = sigma_clipped_stats(mag_diff, sigma=2.0, maxiters=5)
             ztbl[f"{aperture}_mag_{band}"] += zp
             ztbl[f"{aperture}_mag_err_{band}"] = np.hypot(
