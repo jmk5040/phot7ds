@@ -299,10 +299,53 @@ def _annotate_catalog_meta(
     meta["NSCIIMG"] = (
         int(len(science_images)), "Number of measurement (science) images"
     )
+    # Record each science image's basename (SCIMGnnn) and its observation
+    # date (DATE-nnn, from the image's DATE-OBS), plus an exposure-averaged
+    # DATE-OBS / MJD-OBS over all science images.
+    from astropy.time import Time  # local import: avoids top-level cost
+
+    obs_mjds: list[float] = []
     for j, img in enumerate(science_images):
         meta[f"SCIMG{j:03d}"] = (
             str(Path(img).name), f"Science image #{j:03d} basename"
         )
+        try:
+            hdr_j = fits.getheader(img)
+        except Exception:
+            continue
+        date_obs = hdr_j.get("DATE-OBS")
+        recorded_mjd = False
+        if date_obs is not None:
+            meta[f"DATE-{j:03d}"] = (
+                str(date_obs), f"DATE-OBS of science image #{j:03d}"
+            )
+            try:
+                obs_mjds.append(float(Time(str(date_obs), format="isot",
+                                          scale="utc").mjd))
+                recorded_mjd = True
+            except Exception:
+                pass
+        if not recorded_mjd:
+            mjd_val = hdr_j.get("MJD", hdr_j.get("MJD-OBS"))
+            if mjd_val is not None:
+                try:
+                    obs_mjds.append(float(mjd_val))
+                except (TypeError, ValueError):
+                    pass
+    if obs_mjds:
+        mean_mjd = sum(obs_mjds) / len(obs_mjds)
+        meta["MJD-OBS"] = (
+            round(mean_mjd, 6),
+            "Exposure-averaged MJD over science images",
+        )
+        try:
+            meta["DATE-OBS"] = (
+                Time(mean_mjd, format="mjd", scale="utc").isot,
+                "Exposure-averaged DATE-OBS over science images",
+            )
+        except Exception:
+            pass
+
     if mask_ratio is not None:
         meta["MSKRATIO"] = (
             round(float(mask_ratio), 3),

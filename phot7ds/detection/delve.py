@@ -9,13 +9,13 @@ target tile center, pixel scale and image size.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import random
 import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from glob import glob
 from typing import Any, Iterable, Literal
 
 import astropy.units as u
@@ -24,6 +24,7 @@ import requests
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.table import Table
+from astropy.wcs import WCS
 from pyvo.dal import SIAService
 
 log = logging.getLogger(__name__)
@@ -133,17 +134,46 @@ def _resolve_swarp_center(
     return ra_str, dec_str
 
 
+def _auto_grid_counts(
+    ra_span: float,
+    dec_span: float,
+    patch_size_deg: float,
+    overlap: float,
+) -> tuple[int, int]:
+    """Number of columns/rows so patches overlap in *coordinate* degrees.
+
+    The patch footprint is taken conservatively as ``patch_size_deg``
+    coordinate degrees on each axis (no ``cos(dec)`` credit in RA), so the
+    grid is guaranteed to overlap even at high declination where the RA
+    coordinate span is stretched by ``1/cos(dec)``. ``overlap`` is the
+    fractional overlap between adjacent patches (0 = touching, 0.3 = 30%).
+    """
+    step = max(1e-6, patch_size_deg * (1.0 - overlap))
+    n_cols = max(1, math.ceil(ra_span / step))
+    n_rows = max(1, math.ceil(dec_span / step))
+    return n_cols, n_rows
+
+
 def build_patch_centers(
     tile_info: Any,
     *,
-    n_cols: int = 9,
-    n_rows: int = 6,
+    n_cols: int | None = 9,
+    n_rows: int | None = 6,
+    patch_size_deg: float | None = None,
+    overlap: float = 0.0,
 ) -> list[tuple[float, float]]:
     """Generate ``(ra, dec)`` patch centers tiling the field of view.
 
     The four corner positions ``(ra1..ra4, dec1..dec4)`` of ``tile_info``
     define the bounding rectangle, which is divided into a ``n_cols x n_rows``
     grid of equal-area patches.
+
+    Pass ``n_cols=None`` and/or ``n_rows=None`` to size the grid
+    automatically from ``patch_size_deg`` and ``overlap`` so the patches are
+    guaranteed to overlap in coordinate degrees. This matters at high
+    declination: the RA coordinate span is stretched by ``1/cos(dec)``, so a
+    fixed column count that works near the equator leaves thin RA gaps in
+    the mosaic.
     """
     ra = [float(_get_tile_value(tile_info, f"ra{i}")) for i in (1, 2, 3, 4)]
     dec = [float(_get_tile_value(tile_info, f"dec{i}")) for i in (1, 2, 3, 4)]
@@ -151,6 +181,15 @@ def build_patch_centers(
     dec_min, dec_max = min(dec), max(dec)
     ra_span = ra_max - ra_min
     dec_span = dec_max - dec_min
+
+    if n_cols is None or n_rows is None:
+        if patch_size_deg is None:
+            raise ValueError("patch_size_deg is required when n_cols/n_rows is None")
+        auto_cols, auto_rows = _auto_grid_counts(ra_span, dec_span, patch_size_deg, overlap)
+        if n_cols is None:
+            n_cols = auto_cols
+        if n_rows is None:
+            n_rows = auto_rows
 
     ra_centers = [ra_min + (2 * i + 1) * ra_span / (2 * n_cols) for i in range(n_cols)]
     dec_centers = [dec_max - (2 * i + 1) * dec_span / (2 * n_rows) for i in range(n_rows)]
@@ -162,6 +201,138 @@ def build_patch_centers(
     return centers
 
 
+def download_delve_patches(
+    centers: Iterable[tuple[float, float]],
+    *,
+    output_path: str,
+    tile: str,
+    imgtype: str,
+    detection_band: str = "det",
+    patch_size_deg: float = 0.25,
+    sia_url: str = DELVE_SIA_URL,
+    ncores: int = 12,
+    request_timeout: float = 120,
+    max_retries: int = 5,
+    retry_backoff_sec: float = 2.0,
+    filename_prefix: str = "patch",
+    all_matches: bool = False,
+) -> list[str]:
+    """Query the DELVE SIA service for each ``(ra, dec)`` center and download.
+
+    Returns the sorted list of successfully downloaded patch FITS paths.
+    Transient SIA/HTTP failures are retried with exponential backoff; only
+    patches that match the requested ``imgtype`` / ``detection_band`` (and
+    are not ``_nobkg``) are kept. Used by both the full mosaic builder and
+    the gap-filler.
+
+    With ``all_matches=False`` (default) the first matching brick per center
+    is downloaded. With ``all_matches=True`` *every* overlapping matching
+    brick is downloaded (deduplicated by access URL across centers); this is
+    needed near brick boundaries / tile edges where the first-returned brick
+    does not cover the queried position but a neighbouring one does. The
+    extra bricks are MAX-combined downstream by SWarp.
+    """
+    os.makedirs(output_path, exist_ok=True)
+    centers = list(centers)
+    thread_local = threading.local()
+    seen_urls: set[str] = set()
+    seen_lock = threading.Lock()
+
+    def _clients() -> tuple[SIAService, requests.Session]:
+        if not hasattr(thread_local, "sia_service"):
+            thread_local.sia_service = SIAService(sia_url)
+        if not hasattr(thread_local, "http_session"):
+            thread_local.http_session = requests.Session()
+        return thread_local.sia_service, thread_local.http_session
+
+    def _download(url: str, dest: str) -> None:
+        _, http_session = _clients()
+        response = http_session.get(url, stream=True, timeout=(15, request_timeout))
+        response.raise_for_status()
+        with open(dest, "wb") as f:
+            for chunk in response.iter_content(chunk_size=1024 * 256):
+                if chunk:
+                    f.write(chunk)
+
+    def _worker(args: tuple[int, float, float]) -> tuple[int, list[str], str]:
+        patch_idx, ra, dec = args
+        last_error = "Patch download failed after retries"
+        for attempt in range(1, max_retries + 1):
+            try:
+                sia_service, _ = _clients()
+                position = SkyCoord(ra=ra * u.deg, dec=dec * u.deg)
+                results = sia_service.search(pos=position, size=patch_size_deg * u.deg)
+                table = results.to_table()
+                if len(table) == 0:
+                    return patch_idx, [], "No SIA rows returned."
+                prodtype = np.asarray(table["prodtype"]).astype(str)
+                bandpass = np.asarray(table["obs_bandpass"]).astype(str)
+                publisher_did = np.asarray(table["obs_publisher_did"]).astype(str)
+                row_mask = (
+                    (prodtype == imgtype)
+                    & (bandpass == detection_band)
+                    & (np.char.find(publisher_did, "_nobkg") < 0)
+                )
+                if not np.any(row_mask):
+                    return patch_idx, [], "No matching DELVE patch found."
+                rows = table[row_mask]
+                if not all_matches:
+                    rows = rows[:1]
+                out: list[str] = []
+                for sub, match in enumerate(rows):
+                    url = str(match["access_url"])
+                    with seen_lock:
+                        if url in seen_urls:
+                            continue
+                        seen_urls.add(url)
+                    exptime = int(float(match["exptime"]))
+                    patch_img = (
+                        f"{output_path}/DELVE{imgtype.upper()}_{tile}_{detection_band}_"
+                        f"{filename_prefix}{patch_idx:03d}_{sub:02d}_{ra:.4f}{dec:.4f}_"
+                        f"{patch_size_deg:.2f}x{patch_size_deg:.2f}_{exptime}sec.fits"
+                    )
+                    _download(url, patch_img)
+                    out.append(patch_img)
+                return patch_idx, out, "ok"
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                if attempt == max_retries or not _retryable_exception(exc):
+                    return patch_idx, [], f"Patch download failed: {last_error}"
+                delay = _backoff_seconds(attempt, retry_backoff_sec)
+                log.warning(
+                    "[%s] patch %03d attempt %d/%d failed (%s); retry in %.1fs",
+                    tile, patch_idx, attempt, max_retries, last_error, delay,
+                )
+                time.sleep(delay)
+        return patch_idx, [], last_error
+
+    tasks = [(idx, ra, dec) for idx, (ra, dec) in enumerate(centers, 1)]
+    n_patches = len(tasks)
+    n_workers = max(1, min(ncores, n_patches))
+    log.info("[%s] launching %d workers for %d patches", tile, n_workers, n_patches)
+
+    downloaded: list[str] = []
+    n_ok = 0
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        futures = {executor.submit(_worker, t): t[0] for t in tasks}
+        for future in as_completed(futures):
+            idx = futures[future]
+            _, paths, message = future.result()
+            if paths:
+                n_ok += 1
+                log.info("[%s] patch %d/%d OK: %d brick(s)", tile, idx, n_patches, len(paths))
+                downloaded.extend(paths)
+            elif message == "ok":
+                log.info("[%s] patch %d/%d OK: (all bricks already fetched)",
+                         tile, idx, n_patches)
+            else:
+                log.warning("[%s] patch %d/%d FAIL: %s", tile, idx, n_patches, message)
+
+    log.info("[%s] patch download summary: %d/%d centers, %d brick files",
+             tile, n_ok, n_patches, len(downloaded))
+    return sorted(downloaded)
+
+
 def build_delve_detection_image(
     *,
     tile_info: Any,
@@ -171,9 +342,10 @@ def build_delve_detection_image(
     output_path: str,
     swarp_cfg_path: str,
     detection_band: str = "det",
-    n_cols: int = 9,
-    n_rows: int = 6,
+    n_cols: int | None = 9,
+    n_rows: int | None = 6,
     patch_size_deg: float = 0.25,
+    overlap: float = 0.0,
     ncores: int = 12,
     sia_url: str = DELVE_SIA_URL,
     combine_type: str = "MAX",
@@ -208,8 +380,12 @@ def build_delve_detection_image(
         Path to the SWarp config (``default.swarp``).
     detection_band
         DELVE bandpass identifier (default ``'det'``).
-    n_cols, n_rows, patch_size_deg
-        Patch grid geometry.
+    n_cols, n_rows, patch_size_deg, overlap
+        Patch grid geometry. Pass ``n_cols=None`` / ``n_rows=None`` to size
+        the grid automatically from ``patch_size_deg`` and ``overlap`` so the
+        patches overlap in coordinate degrees (recommended for high-|dec|
+        tiles, where a fixed column count leaves thin RA gaps). ``overlap``
+        is the fractional overlap between neighbouring patches.
     ncores
         Concurrency: number of worker threads for SIA downloads (also passed
         to SWarp ``-NTHREADS``).
@@ -249,93 +425,24 @@ def build_delve_detection_image(
     tile = str(_get_tile_value(tile_info, "tile"))
     os.makedirs(output_path, exist_ok=True)
 
-    centers = build_patch_centers(tile_info, n_cols=n_cols, n_rows=n_rows)
+    centers = build_patch_centers(
+        tile_info, n_cols=n_cols, n_rows=n_rows,
+        patch_size_deg=patch_size_deg, overlap=overlap,
+    )
     n_patches = len(centers)
-    thread_local = threading.local()
 
-    def _clients() -> tuple[SIAService, requests.Session]:
-        if not hasattr(thread_local, "sia_service"):
-            thread_local.sia_service = SIAService(sia_url)
-        if not hasattr(thread_local, "http_session"):
-            thread_local.http_session = requests.Session()
-        return thread_local.sia_service, thread_local.http_session
-
-    def _query_and_download(args: tuple[int, float, float]) -> tuple[int, str, bool]:
-        patch_idx, ra, dec = args
-        last_error: str = "Patch download failed after retries"
-        for attempt in range(1, max_retries + 1):
-            try:
-                sia_service, http_session = _clients()
-                position = SkyCoord(ra=ra * u.deg, dec=dec * u.deg)
-                size = patch_size_deg * u.deg
-                results = sia_service.search(pos=position, size=size)
-                table = results.to_table()
-                if len(table) == 0:
-                    return patch_idx, "No SIA rows returned.", False
-
-                prodtype = np.asarray(table["prodtype"]).astype(str)
-                bandpass = np.asarray(table["obs_bandpass"]).astype(str)
-                publisher_did = np.asarray(table["obs_publisher_did"]).astype(str)
-                row_mask = (
-                    (prodtype == imgtype)
-                    & (bandpass == detection_band)
-                    & (np.char.find(publisher_did, "_nobkg") < 0)
-                )
-                if not np.any(row_mask):
-                    return patch_idx, "No matching DELVE patch found.", False
-
-                match = table[row_mask][0]
-                download_url = str(match["access_url"])
-                exptime = int(float(match["exptime"]))
-                patch_img = (
-                    f"{output_path}/DELVE{imgtype.upper()}_{tile}_{detection_band}_"
-                    f"patch{patch_idx:02d}_{ra:.4f}{dec:.4f}_"
-                    f"{patch_size_deg:.2f}x{patch_size_deg:.2f}_{exptime}sec.fits"
-                )
-                response = http_session.get(
-                    download_url, stream=True, timeout=(15, request_timeout)
-                )
-                response.raise_for_status()
-                with open(patch_img, "wb") as f:
-                    for chunk in response.iter_content(chunk_size=1024 * 256):
-                        if chunk:
-                            f.write(chunk)
-                return patch_idx, os.path.basename(patch_img), True
-            except Exception as exc:
-                last_error = f"{type(exc).__name__}: {exc}"
-                if attempt == max_retries or not _retryable_exception(exc):
-                    return patch_idx, f"Patch download failed: {last_error}", False
-                delay = _backoff_seconds(attempt, retry_backoff_sec)
-                log.warning(
-                    "[%s] patch %02d attempt %d/%d failed (%s); retry in %.1fs",
-                    tile, patch_idx, attempt, max_retries, last_error, delay,
-                )
-                time.sleep(delay)
-                continue
-        return patch_idx, last_error, False
-
-    tasks = [(idx, ra, dec) for idx, (ra, dec) in enumerate(centers, 1)]
-    n_workers = max(1, min(ncores, n_patches))
-    log.info("[%s] launching %d workers for %d patches", tile, n_workers, n_patches)
-
-    n_success = 0
-    with ThreadPoolExecutor(max_workers=n_workers) as executor:
-        futures = {executor.submit(_query_and_download, t): t[0] for t in tasks}
-        for future in as_completed(futures):
-            idx = futures[future]
-            _, message, success = future.result()
-            if success:
-                log.info("[%s] patch %d/%d OK: %s", tile, idx, n_patches, message)
-                n_success += 1
-            else:
-                log.warning("[%s] patch %d/%d FAIL: %s", tile, idx, n_patches, message)
-
-    log.info("[%s] patch download summary: %d/%d", tile, n_success, n_patches)
-
-    patch_imgs = sorted(
-        glob(
-            f"{output_path}/DELVE{imgtype.upper()}_{tile}_{detection_band}_patch*.fits"
-        )
+    patch_imgs = download_delve_patches(
+        centers,
+        output_path=output_path,
+        tile=tile,
+        imgtype=imgtype,
+        detection_band=detection_band,
+        patch_size_deg=patch_size_deg,
+        sia_url=sia_url,
+        ncores=ncores,
+        request_timeout=request_timeout,
+        max_retries=max_retries,
+        retry_backoff_sec=retry_backoff_sec,
     )
     if not patch_imgs:
         raise RuntimeError(f"[{tile}] no patch images downloaded")
@@ -488,9 +595,288 @@ def _build_swarp_args(
     return common + specific
 
 
+def _gap_query_centers(
+    gap: np.ndarray,
+    wcs: WCS,
+    patch_size_deg: float,
+    overlap: float,
+    *,
+    stride: int = 4,
+) -> list[tuple[float, float]]:
+    """Minimal set of ``(ra, dec)`` patch centers covering the gap pixels.
+
+    Empty (``gap``) pixels are projected to the sky and binned onto a grid
+    of step ``patch_size_deg * (1 - overlap)`` coordinate degrees; one query
+    center is emitted per occupied bin, so a thin gap stripe maps to a small
+    number of overlapping patch queries.
+    """
+    ys, xs = np.where(gap)
+    if stride > 1:
+        ys, xs = ys[::stride], xs[::stride]
+    if xs.size == 0:
+        return []
+    ra, dec = wcs.all_pix2world(xs.astype(float), ys.astype(float), 0)
+    ra = np.asarray(ra, dtype=float)
+    dec = np.asarray(dec, dtype=float)
+    good = np.isfinite(ra) & np.isfinite(dec)
+    ra, dec = ra[good], dec[good]
+    if ra.size == 0:
+        return []
+    step = max(1e-6, patch_size_deg * (1.0 - overlap))
+    ra0, dec0 = float(ra.min()), float(dec.min())
+    bi = np.floor((ra - ra0) / step).astype(np.int64)
+    bj = np.floor((dec - dec0) / step).astype(np.int64)
+    # One query per occupied bin, placed at the *centroid of the gap pixels*
+    # in that bin (not the geometric bin center). DELVE gaps sit on brick
+    # boundaries, so a query offset from the seam returns the neighbouring
+    # brick whose edge coincides with the gap; centering on the gap pixels
+    # makes the SIA return a brick that actually covers them.
+    key = bi * 100000 + bj
+    order = np.argsort(key, kind="stable")
+    key_s, ra_s, dec_s = key[order], ra[order], dec[order]
+    uk, start = np.unique(key_s, return_index=True)
+    cnt = np.diff(np.append(start, key_s.size))
+    ra_c = np.add.reduceat(ra_s, start) / cnt
+    dec_c = np.add.reduceat(dec_s, start) / cnt
+    return list(zip(ra_c.tolist(), dec_c.tolist()))
+
+
+def _swarp_gap_mosaic(
+    patch_imgs: list[str],
+    *,
+    hdr: fits.Header,
+    swarp_cfg_path: str,
+    patch_dir: str,
+    tag: str,
+    ncores: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """SWarp ``patch_imgs`` onto the frame described by ``hdr``.
+
+    Returns ``(data, covered)`` where ``covered`` is the boolean coverage
+    map derived from the SWarp weight image (so a valid value of 0 in a mask
+    mosaic is not mistaken for "no coverage").
+    """
+    nx = int(hdr["NAXIS1"])
+    ny = int(hdr["NAXIS2"])
+    if "CD1_1" in hdr:
+        pixscale = abs(float(hdr["CD1_1"])) * 3600.0
+    else:
+        pixscale = abs(float(hdr["CDELT1"])) * 3600.0
+    ra_c, dec_c = deg_to_hms_dms(float(hdr["CRVAL1"]), float(hdr["CRVAL2"]))
+
+    list_file = os.path.join(patch_dir, f"{tag}.list")
+    with open(list_file, "w") as fh:
+        fh.write("\n".join(patch_imgs) + "\n")
+    gap_img = os.path.join(patch_dir, f"{tag}.fits")
+    gap_wgt = os.path.join(patch_dir, f"{tag}_weight.fits")
+
+    swarp_args = [
+        "SWarp", f"@{list_file}",
+        "-c", swarp_cfg_path,
+        "-COMBINE_TYPE", "MAX",
+        "-RESAMPLING_TYPE", "NEAREST",
+        "-SUBTRACT_BACK", "N",
+        "-FSCALASTRO_TYPE", "FIXED",
+        "-FSCALE_KEYWORD", "NONE",
+        "-FSCALE_DEFAULT", "1.0",
+        "-PIXELSCALE_TYPE", "MANUAL",
+        "-PIXEL_SCALE", f"{pixscale:.4f}",
+        "-CENTER_TYPE", "MANUAL",
+        "-CENTER", f"{ra_c},{dec_c}",
+        "-IMAGE_SIZE", f"{nx},{ny}",
+        "-INTERPOLATE", "N",
+        "-RESAMPLE", "Y",
+        "-RESAMPLE_DIR", patch_dir,
+        "-DELETE_TMPFILES", "Y",
+        "-WRITE_XML", "N",
+        "-VERBOSE_TYPE", "QUIET",
+        "-WEIGHTOUT_NAME", gap_wgt,
+        "-NTHREADS", str(ncores),
+        "-IMAGEOUT_NAME", gap_img,
+    ]
+    proc = subprocess.run(swarp_args, capture_output=True, text=True)
+    if proc.returncode != 0 or not os.path.exists(gap_img):
+        raise RuntimeError(f"gap-fill SWarp failed: {proc.stderr}")
+
+    gap_data = fits.getdata(gap_img)
+    if os.path.exists(gap_wgt):
+        covered = fits.getdata(gap_wgt) > 0
+    else:
+        covered = np.isfinite(gap_data) & (gap_data != 0)
+    for p in (list_file, gap_img, gap_wgt):
+        try:
+            os.remove(p)
+        except FileNotFoundError:
+            pass
+    return gap_data, covered
+
+
+def fill_delve_detection_gaps(
+    *,
+    image_path: str,
+    swarp_cfg_path: str,
+    imgtype: Literal["image", "mask"],
+    coverage_reference: str | None = None,
+    detection_band: str = "det",
+    patch_size_deg: float = 0.25,
+    overlap: float = 0.5,
+    max_passes: int = 5,
+    sia_url: str = DELVE_SIA_URL,
+    ncores: int = 12,
+    request_timeout: float = 120,
+    max_retries: int = 5,
+    retry_backoff_sec: float = 2.0,
+    coverage_tol: float = 1e-4,
+    cleanup: bool = True,
+) -> dict:
+    """Fill coverage gaps in an existing DELVE mosaic, in place.
+
+    Gaps (empty pixels) are located from ``coverage_reference`` (defaults to
+    ``image_path``; for a *mask* pass the sibling science-image path so the
+    well-defined image coverage drives the gap definition). DELVE patches are
+    queried only for the gap regions, SWarped onto the *same* frame as
+    ``image_path``, and merged into the empty pixels.
+
+    The fill iterates up to ``max_passes`` times: each pass re-derives query
+    centers from the *remaining* gap, so patch-edge slivers left by one pass
+    are recentered and covered by the next. The file is rewritten in place
+    (original header preserved).
+
+    Returns a summary dict (gap fraction before/after, query centers,
+    downloaded patches, passes run).
+    """
+    if imgtype not in ("image", "mask"):
+        raise ValueError("imgtype must be 'image' or 'mask'")
+
+    image_path = str(image_path)
+    ref_path = str(coverage_reference) if coverage_reference else image_path
+    tile = os.path.basename(image_path).split("_")[0]
+    out_dir = os.path.dirname(image_path) or "."
+    patch_dir = os.path.join(out_dir, f"{tile}_gapfill_{imgtype}")
+
+    # Frame + data of the file we will rewrite.
+    with fits.open(image_path) as hdul:
+        data = hdul[0].data
+        hdr = hdul[0].header.copy()
+        wcs = WCS(hdr)
+
+    # "want" = the region we ultimately want covered, from the reference.
+    with fits.open(ref_path) as hdul:
+        ref_data = hdul[0].data
+    want = ~(np.isfinite(ref_data) & (ref_data != 0))
+    gap_frac = float(want.mean())
+
+    summary = {
+        "image": image_path,
+        "tile": tile,
+        "gap_fraction_before": gap_frac,
+        "n_centers": 0,
+        "n_patches": 0,
+        "passes": 0,
+        "gap_fraction_after": gap_frac,
+        "filled": False,
+    }
+    if gap_frac <= coverage_tol or not want.any():
+        log.info("[%s] no gaps to fill in %s (gap fraction %.4f)",
+                 tile, os.path.basename(image_path), gap_frac)
+        return summary
+
+    filled_region = np.zeros_like(want)
+    total_centers = 0
+    total_patches = 0
+
+    for pass_idx in range(1, max_passes + 1):
+        remaining = want & ~filled_region
+        rem_frac = float(remaining.mean())
+        if rem_frac <= coverage_tol or not remaining.any():
+            break
+        centers = _gap_query_centers(remaining, wcs, patch_size_deg, overlap)
+        if not centers:
+            break
+        log.info("[%s] %s pass %d: gap %.4f -> %d gap-patch queries",
+                 tile, os.path.basename(image_path), pass_idx, rem_frac, len(centers))
+        patch_imgs = download_delve_patches(
+            centers,
+            output_path=patch_dir,
+            tile=tile,
+            imgtype=imgtype,
+            detection_band=detection_band,
+            patch_size_deg=patch_size_deg,
+            sia_url=sia_url,
+            ncores=ncores,
+            request_timeout=request_timeout,
+            max_retries=max_retries,
+            retry_backoff_sec=retry_backoff_sec,
+            filename_prefix=f"gap{pass_idx}_",
+            all_matches=True,
+        )
+        total_centers += len(centers)
+        total_patches += len(patch_imgs)
+        if not patch_imgs:
+            log.warning("[%s] pass %d: no gap patches downloaded; stopping",
+                        tile, pass_idx)
+            break
+
+        gap_data, gap_wcov = _swarp_gap_mosaic(
+            patch_imgs,
+            hdr=hdr,
+            swarp_cfg_path=swarp_cfg_path,
+            patch_dir=patch_dir,
+            tag=f"{tile}_gapfill_{imgtype}_pass{pass_idx}",
+            ncores=ncores,
+        )
+        if cleanup:
+            for p in patch_imgs:
+                try:
+                    os.remove(p)
+                except FileNotFoundError:
+                    pass
+
+        # Coverage of the gap mosaic. For science images a pixel only counts
+        # as filled when it carries real (non-zero) data: SWarp can leave
+        # weight>0 with data==0 at resampled brick edges, and trusting the
+        # weight there would mark truly-empty pixels as "filled" so later
+        # passes skip them. For masks a value of 0 is legitimate, so the
+        # weight map is the only reliable coverage indicator.
+        if imgtype == "image":
+            new_cov = np.isfinite(gap_data) & (gap_data != 0)
+        else:
+            new_cov = gap_wcov
+        fill_mask = remaining & new_cov
+        n_new = int(fill_mask.sum())
+        if n_new == 0:
+            log.info("[%s] pass %d added no coverage; stopping", tile, pass_idx)
+            summary["passes"] = pass_idx
+            break
+        data[fill_mask] = gap_data[fill_mask].astype(data.dtype)
+        filled_region |= fill_mask
+        summary["passes"] = pass_idx
+        log.info("[%s] pass %d filled %d pixels", tile, pass_idx, n_new)
+
+    if total_patches and summary["passes"]:
+        fits.writeto(image_path, data, hdr, overwrite=True)
+        summary["filled"] = True
+    summary["n_centers"] = total_centers
+    summary["n_patches"] = total_patches
+    summary["gap_fraction_after"] = float((want & ~filled_region).mean())
+    log.info("[%s] %s gap fraction %.4f -> %.4f (%d passes, %d patches)",
+             tile, os.path.basename(image_path), gap_frac,
+             summary["gap_fraction_after"], summary["passes"], total_patches)
+
+    if cleanup:
+        try:
+            os.rmdir(patch_dir)
+        except OSError:
+            pass
+
+    return summary
+
+
 __all__ = [
     "DELVE_SIA_URL",
     "deg_to_hms_dms",
     "build_delve_detection_image",
     "build_patch_centers",
+    "download_delve_patches",
+    "fill_delve_detection_gaps",
 ]

@@ -191,7 +191,7 @@ def _reference_frame(image_path: str) -> tuple[float, float, float, int, int]:
         raise KeyError(f"No CD1_1 / CDELT1 in {os.path.basename(image_path)}")
     return ra, dec, pixscale, int(h["NAXIS1"]), int(h["NAXIS2"])
 
-
+#%%
 def build_7ds_detection_image(
     *,
     image_dir: str,
