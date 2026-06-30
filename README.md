@@ -535,9 +535,25 @@ A runnable version is in `examples/example_vac.py`.
 2. **Flux assembly** (`fluxes.py`) — build the EAzY/FAST++ `.cat`
    (AB zeropoint 25) with Galactic-extinction correction (SFD + Fitzpatrick99
    at the tile center).
-3. **Photo-z** (`photoz.py`) — eazy-py on the auto-detected filter set, with
-   the default m625 prior.
+3. **Photo-z** — on the auto-detected filter set, with the default m625
+   prior. Two interchangeable backends (`VACConfig.photoz_engine`):
+   - `"binary"` (**default**, `photoz_binary.py`) — shells out to the
+     compiled EAzY executable (`VACConfig.eazy_bin`). Fast (≈2 min for ~800
+     sources) and the recommended path.
+   - `"eazy-py"` (`photoz.py`) — the pure-Python `eazy.photoz.PhotoZ`. Kept
+     for reference, but its `TemplateGrid` build is pathologically slow for
+     the 7DS medium-band filter set (a single template can take longer to
+     integrate than the binary needs for the whole catalog), so it is not
+     recommended for production runs.
 4. **SED fit** (`sedfit.py`) — FAST++ for stellar mass, SFR, age, Av, ….
+   The fit is anchored at the EAzY photo-z (`FORCE_ZPHOT=1`) and uses the
+   fast low-resolution BC03 grid by default. The grid/performance knobs
+   (`fastpp_resolution`, `fastpp_force_zphot`, `fastpp_parallel`,
+   `fastpp_metal`, `z_step_type`) have defaults that reproduce the fast
+   legacy configuration — without them the run inherits the slow
+   `LIB/fastpp.param` defaults (`RESOLUTION='hr'`, `FORCE_ZPHOT=0`) and is
+   many times slower. FAST++ stdout/stderr is streamed live to
+   `<output_root>/fastpp/<tile>/<catalog>_fastpp.log`.
 5. **Merge** (`catalog.py`) — `hstack` the photo-z and SED-fit outputs onto a
    carried-over id table and write the final FITS catalog plus a run log.
 
@@ -569,6 +585,17 @@ warning is logged, the run proceeds **without** a prior, and the column is
 **`z_a`**. FAST++ `NAME_ZPHOT` is pointed at whichever column is produced.
 Override with `prior_band=` / `prior_file=`.
 
+### Photo-z engine (`photoz_engine`)
+
+`VACConfig.photoz_engine` selects the redshift backend and defaults to
+`"binary"`, which runs the compiled EAzY executable at
+`VACConfig.eazy_bin` (default `/data/data1/7DS/RIS/config/eazy/src/eazy`).
+The binary writes its native `.zout` — which already carries `z_m2`/`z_a`
+plus the `l68/u68`, `l95/u95`, `l99/u99` confidence intervals FAST++ needs —
+and that file is copied straight into the SED-fit directory. Set
+`photoz_engine="eazy-py"` to use the pure-Python path instead (see below);
+the `eazy_n_proc` knob only applies to that path.
+
 ### eazy-py parallelism (`eazy_n_proc`)
 
 eazy-py's `TemplateGrid` (serial when `n_proc < 0`) and `fit_catalog`
@@ -592,8 +619,12 @@ environment. (`n_proc` still controls FAST++ threads.)
 
 The run log records the timestamp, cross-match settings, the detected filter
 list with central wavelengths and extinction, target counts, the full
-eazy-py configuration (prior choice, redshift column, parallelism), and the
-full FAST++ configuration.
+eazy/photo-z configuration (engine, prior choice, redshift column), and the
+full FAST++ configuration. Note this `*_vac.log` is written **once at the
+end** of a successful run; for live progress during the (multi-minute)
+photo-z and SED-fit stages, tail the per-stage logs that the external tools
+stream as they run: `<output_root>/eazy/<tile>/<tile>_<ref>_eazy.log` and
+`<output_root>/fastpp/<tile>/<catalog>_fastpp.log`.
 
 ### vac smoke tests
 

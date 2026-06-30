@@ -75,7 +75,11 @@ def write_run_log(
             )
 
     if eazy_info:
-        lines.append(_section("EAzY (eazy-py) photo-z"))
+        engine = eazy_info.get("engine", "eazy-py")
+        lines.append(_section(f"EAzY ({engine}) photo-z"))
+        lines.append(_kv("engine", engine))
+        if eazy_info.get("binary"):
+            lines.append(_kv("binary", eazy_info.get("binary")))
         lines.append(_kv("apply_prior", eazy_info.get("apply_prior")))
         lines.append(_kv("prior_band", eazy_info.get("prior_band")))
         lines.append(_kv("prior_filter", eazy_info.get("prior_filter")))
@@ -83,8 +87,12 @@ def write_run_log(
         lines.append(_kv("prior_file", eazy_info.get("prior_file")))
         lines.append(_kv("redshift_column", eazy_info.get("zphot_column")))
         lines.append(_kv("n_targets", eazy_info.get("n_targets")))
-        lines.append(_kv("template-grid n_proc", eazy_info.get("grid_n_proc")))
-        lines.append(_kv("fit n_proc", eazy_info.get("fit_n_proc")))
+        if eazy_info.get("run_log"):
+            lines.append(_kv("run_log", eazy_info.get("run_log")))
+        if "grid_n_proc" in eazy_info:
+            lines.append(_kv("template-grid n_proc", eazy_info.get("grid_n_proc")))
+        if "fit_n_proc" in eazy_info:
+            lines.append(_kv("fit n_proc", eazy_info.get("fit_n_proc")))
         params = eazy_info.get("params", {})
         if params:
             lines.append("\n  eazy parameters:\n")
@@ -96,6 +104,8 @@ def write_run_log(
         lines.append(_kv("binary", fastpp_info.get("binary")))
         lines.append(_kv("name_zphot", fastpp_info.get("name_zphot")))
         lines.append(_kv("n_fits", fastpp_info.get("n_fits")))
+        if fastpp_info.get("run_log"):
+            lines.append(_kv("run_log", fastpp_info.get("run_log")))
         params = fastpp_info.get("params", {})
         if params:
             lines.append("\n  fast++ parameters:\n")

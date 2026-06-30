@@ -32,6 +32,9 @@ from .vizier import ensure_external_catalog
 # ``pipeline`` imports photoz/sedfit lazily, so it is safe to expose here.
 from .pipeline import VACResult, run_value_added
 
+# Photo-z backend (binary). Importable without eazy-py installed.
+from .photoz_binary import run_eazy_binary
+
 __all__ = [
     "VACConfig",
     "VACResult",
@@ -41,4 +44,5 @@ __all__ = [
     "detect_filters",
     "ensure_external_catalog",
     "write_run_log",
+    "run_eazy_binary",
 ]

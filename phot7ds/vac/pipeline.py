@@ -74,7 +74,10 @@ def run_value_added(
     -------
     VACResult
     """
-    config.validate(require_fastpp=do_sedfit)
+    config.validate(
+        require_fastpp=do_sedfit,
+        require_eazy_bin=do_photoz and config.photoz_engine == "binary",
+    )
 
     if not isinstance(tile_table, Table):
         tile_table = Table.read(tile_table)
@@ -102,9 +105,14 @@ def run_value_added(
     name_zphot = "z_a"  # default when no prior / no photo-z
 
     if do_photoz:
-        from .photoz import run_eazy
+        if config.photoz_engine == "binary":
+            from .photoz_binary import run_eazy_binary
 
-        photoz_tbl, eazy_info = run_eazy(config, tile)
+            photoz_tbl, eazy_info = run_eazy_binary(config, tile)
+        else:
+            from .photoz import run_eazy
+
+            photoz_tbl, eazy_info = run_eazy(config, tile)
         name_zphot = eazy_info["zphot_column"]
         photoz_done = True
 

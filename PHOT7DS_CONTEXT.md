@@ -75,8 +75,8 @@ phot7ds/
     sevends.py       # 7DS native white detection image builder
     __init__.py
   vac/               # value-added catalog subpackage (see §7)
-    config.py photoz.py sedfit.py fluxes.py crossmatch.py vizier.py
-    catalog.py report.py pipeline.py __init__.py
+    config.py photoz.py photoz_binary.py sedfit.py fluxes.py crossmatch.py
+    vizier.py catalog.py report.py pipeline.py __init__.py
 ```
 
 ## 5. Photometry pipeline conventions
@@ -155,9 +155,21 @@ phot7ds/
 - Stages: galaxy match + optional external-catalog download (REGALADE, VHS,
   GALEX, WISE via Vizier — `vac/vizier.py`, `auto_download=True`) →
   flux catalog (`vac/fluxes.py`, **auto-detects filters** from catalog columns,
-  no more `use_medium/use_broad`) → photo-z EAzY (`vac/photoz.py`) →
+  no more `use_medium/use_broad`) → photo-z (see engine below) →
   SED fit FAST++ (`vac/sedfit.py`) → assemble (`vac/catalog.py`) → run log
   (`vac/report.py`).
+- **Photo-z engine (`VACConfig.photoz_engine`, added 2026-06-30):** default
+  `"binary"` → `vac/photoz_binary.py:run_eazy_binary()` shells out to the
+  compiled EAzY at `VACConfig.eazy_bin`
+  (`/data/data1/7DS/RIS/config/eazy/src/eazy`); ~2 min for ~800 sources. The
+  binary's native `.zout` already has `z_m2`/`z_a` + `l68/u68/l95/u95/l99/u99`
+  for FAST++, so it is copied verbatim into the SED-fit dir.
+  `"eazy-py"` → `vac/photoz.py:run_eazy()` (pure Python) is kept but is
+  **effectively unusable** for the 7DS medium-band set: the eazy-py
+  `TemplateGrid` build (`PhotoZ.__init__`, serial) failed to finish even one
+  of 8 templates in 242 s on T22956 (803 rows, 27 filters), long before
+  `fit_catalog` started. It is the grid build that is slow, NOT the ZP
+  offsets (eazy-py never iterates ZP here) and NOT `fit_catalog`.
 - Filters: broad bands use `f_7DS_g/r/i` (not `f_SDSS_*`). `FILTER.RES.latest`
   and `default.translate` were updated by `update_7ds_filters.py`; keep the two
   files in sync (a prior desync was missing `f_7DS_g/r/i`).
@@ -193,6 +205,30 @@ phot7ds/
 3. `calibration.py`: ZP "fitting" log now shows the instrumental column
    (per-aperture clarity); pre-filter NaNs before `sigma_clipped_stats` to
    silence repeated "invalid values" warnings.
+
+## 9b. Recent changes (2026-06-30)
+
+1. `vac`: added a **binary EAzY photo-z backend** (`vac/photoz_binary.py:
+   run_eazy_binary`) and made it the default via `VACConfig.photoz_engine
+   = "binary"` (+ `VACConfig.eazy_bin`). `vac/pipeline.py` dispatches on the
+   engine; `validate(require_eazy_bin=...)` checks the executable; `report.py`
+   logs the engine. Benchmarked on T22956 (803 rows): binary ≈115 s vs.
+   eazy-py not finishing the template-grid build in 242 s. Diagnosis: the
+   eazy-py slowness is the serial `TemplateGrid` build, not ZP offsets.
+
+2. `vac/sedfit.py`: the FAST++ run was inheriting the slow shared
+   `LIB/fastpp.param` defaults (`RESOLUTION='hr'`, `FORCE_ZPHOT=0`,
+   `Z_STEP_TYPE=0`), making it many× slower than the legacy script.
+   `_build_overrides` now sets the perf-critical keys from new `VACConfig`
+   knobs (`fastpp_resolution='lr'`, `fastpp_force_zphot=True`,
+   `fastpp_parallel='generators'`, `fastpp_metal=(.004,.008,.02,.05)`,
+   `z_step_type=1`). T22956: ~3m11s (grid 1,625,888 = ntau4·nmetal4·nage11·
+   nav31·nz298), matching the original.
+
+3. Live logs: both external tools now stream stdout/stderr to a saved file
+   (`eazy/<tile>/<tile>_<ref>_eazy.log`, `fastpp/<tile>/<catalog>_fastpp.log`)
+   instead of buffering in memory. The `*_vac.log` run log is still written
+   only once at the end of a successful run.
 
 ## 10. Open / possible next steps
 

@@ -8,6 +8,8 @@ mirroring :mod:`phot7ds.config_io`.
 """
 from __future__ import annotations
 
+import os
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -75,6 +77,8 @@ class VACConfig:
     fastpp_share_dir: str | Path | None = None
     fastpp_library_dir: str | Path | None = None
     sfd_dir: str | Path | None = None
+    # Compiled EAzY binary (used when photoz_engine == "binary").
+    eazy_bin: str | Path = "/data/data1/7DS/RIS/config/eazy/src/eazy"
 
     # Naming / catalog columns
     detection_ref: str = "DELVE"
@@ -133,6 +137,25 @@ class VACConfig:
     z_min: float = 0.01
     z_max: float = 1.0
     z_step: float = 0.001
+    z_step_type: int = 1  # 0 = Z_STEP, 1 = Z_STEP*(1+z) (log; matches eazy)
+
+    # FAST++ SED-fit grid / performance knobs. Defaults reproduce the fast,
+    # photo-z-anchored configuration of the legacy RIS_catalog_fastpp.py; the
+    # raw LIB/fastpp.param template ships much slower defaults (RESOLUTION
+    # 'hr', FORCE_ZPHOT 0), which is why an un-tuned vac run is far slower than
+    # the original. Override any of these (or anything else) via fastpp_params.
+    fastpp_resolution: str = "lr"          # 'pr'/'lr'/'hr'; 'hr' is far slower
+    fastpp_force_zphot: bool = True        # fit only at the EAzY photo-z
+    fastpp_parallel: str = "generators"    # suits many models + few sources
+    fastpp_metal: tuple[float, ...] = (0.004, 0.008, 0.02, 0.05)
+
+    # Photo-z engine. "binary" shells out to the compiled EAzY executable
+    # (``eazy_bin``) and is the default: the pure-Python eazy-py TemplateGrid
+    # build is pathologically slow for the 7DS medium-band filter set (it can
+    # take longer to integrate a single template through the ~27 filters x
+    # redshift grid than the binary takes to fit the whole catalog). Set to
+    # "eazy-py" only if you specifically need the pure-Python path.
+    photoz_engine: str = "binary"  # "binary" | "eazy-py"
 
     # Execution
     n_proc: int = 8  # FAST++ threads (and default object count is small)
@@ -145,6 +168,19 @@ class VACConfig:
     eazy_n_proc: int = -1
     eazy_params: dict[str, Any] = field(default_factory=dict)
     fastpp_params: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # Early, non-fatal heads-up: when the (default) binary photo-z engine
+        # is selected but no executable is found at ``eazy_bin``, warn now so
+        # the user can fix the path before a long run reaches the photo-z
+        # stage. ``validate(require_eazy_bin=True)`` still hard-fails later.
+        if self.photoz_engine == "binary" and not self.eazy_bin_ok():
+            warnings.warn(
+                f"VACConfig.photoz_engine='binary' but no EAzY executable was "
+                f"found at eazy_bin={self.eazy_bin!s}. Build/point to the "
+                f"compiled 'eazy' binary, or set photoz_engine='eazy-py'.",
+                stacklevel=2,
+            )
 
     # ------------------------------------------------------------------
     # Derived paths
@@ -243,12 +279,21 @@ class VACConfig:
     # ------------------------------------------------------------------
     # Validation
     # ------------------------------------------------------------------
-    def validate(self, *, require_fastpp: bool = True) -> None:
+    def eazy_bin_ok(self) -> bool:
+        """True when ``eazy_bin`` exists and is an executable file."""
+        path = str(self.eazy_bin)
+        return os.path.isfile(path) and os.access(path, os.X_OK)
+
+    def validate(self, *, require_fastpp: bool = True,
+                 require_eazy_bin: bool = False) -> None:
         """Check that required config files / binaries exist.
 
         Raises :class:`FileNotFoundError` with a helpful message when a
         required input is missing. External per-tile catalogs are checked
         lazily during the run (REGALADE required, VHS/GALEX optional).
+
+        ``require_eazy_bin`` checks the compiled EAzY executable, needed when
+        the photo-z stage runs with ``photoz_engine == "binary"``.
         """
         required = [
             (self.lib_path, "EAzY/FAST++ LIB directory"),
@@ -268,6 +313,13 @@ class VACConfig:
             raise FileNotFoundError(
                 f"FAST++ binary not found at {self.fastpp_bin}. Install FAST++ "
                 "and set VACConfig.fastpp_bin, or run with do_sedfit=False."
+            )
+        if require_eazy_bin and not self.eazy_bin_ok():
+            raise FileNotFoundError(
+                f"EAzY executable not found / not executable at {self.eazy_bin}. "
+                "Build the compiled eazy executable and set VACConfig.eazy_bin, "
+                "or set VACConfig.photoz_engine='eazy-py' to use the pure-Python "
+                "path."
             )
 
 

@@ -22,6 +22,15 @@ from .config import VACConfig
 log = logging.getLogger(__name__)
 
 
+def _tail(path, n: int = 30) -> str:
+    """Return the last ``n`` lines of a text file (best-effort)."""
+    try:
+        with open(path) as fh:
+            return "".join(fh.readlines()[-n:])
+    except OSError:
+        return ""
+
+
 def _format_value(value) -> str:
     if isinstance(value, bool):
         return "1" if value else "0"
@@ -36,7 +45,16 @@ def _format_value(value) -> str:
 
 
 def _build_overrides(cfg: VACConfig, catalog: str, name_zphot: str) -> dict:
-    """FAST++ parameter overrides applied on top of the LIB template."""
+    """FAST++ parameter overrides applied on top of the LIB template.
+
+    The grid / performance keys (``RESOLUTION``, ``FORCE_ZPHOT``,
+    ``Z_STEP_TYPE``, ``METAL``, ``PARALLEL``) are set explicitly so the run
+    does not silently inherit the slow defaults baked into the shared
+    ``LIB/fastpp.param`` template (``RESOLUTION='hr'``, ``FORCE_ZPHOT=0``),
+    which made an un-tuned vac fit far slower than the legacy script.
+    ``FORCE_ZPHOT`` restricts the fit to the EAzY photo-z (we trust it),
+    which is both the intended behaviour and a large speedup.
+    """
     share = cfg.fastpp_share
     overrides = {
         "CATALOG": catalog,
@@ -46,10 +64,15 @@ def _build_overrides(cfg: VACConfig, catalog: str, name_zphot: str) -> dict:
         "TEMP_ERR_FILE": str(share / "TEMPLATE_ERROR.fast.v0.2"),
         "LIBRARY_DIR": str(cfg.fastpp_libraries) + "/",
         "NAME_ZPHOT": name_zphot,
+        # Grid / performance (match the fast legacy configuration).
+        "RESOLUTION": cfg.fastpp_resolution,
+        "FORCE_ZPHOT": cfg.fastpp_force_zphot,
+        "PARALLEL": cfg.fastpp_parallel,
+        "METAL": list(cfg.fastpp_metal),
         "Z_MIN": cfg.z_min,
         "Z_MAX": cfg.z_max,
         "Z_STEP": cfg.z_step,
-        "PARALLEL": "sources",
+        "Z_STEP_TYPE": cfg.z_step_type,
         "N_THREAD": cfg.n_proc,
     }
     overrides.update(cfg.fastpp_params)
@@ -120,15 +143,22 @@ def run_fastpp(cfg: VACConfig, tile: str, *, name_zphot: str = "z_phot") -> tupl
     param_path = _write_param(cfg, tile, catalog, str(sedfit_dir), overrides)
 
     cmd = [str(cfg.fastpp_bin), os.path.basename(param_path)]
-    log.info("Running FAST++: %s (cwd=%s, NAME_ZPHOT=%s)",
-             " ".join(cmd), sedfit_dir, name_zphot)
-    proc = subprocess.run(
-        cmd, cwd=str(sedfit_dir), capture_output=True, text=True
-    )
+    # Stream FAST++ stdout+stderr to a log file (live, tailable, preserved)
+    # instead of buffering it in memory; the long fit then shows progress and
+    # leaves a record even if a later stage fails.
+    run_log = sedfit_dir / f"{catalog}_fastpp.log"
+    log.info("Running FAST++: %s (cwd=%s, NAME_ZPHOT=%s); output -> %s",
+             " ".join(cmd), sedfit_dir, name_zphot, run_log)
+    with open(run_log, "w") as fh:
+        proc = subprocess.run(
+            cmd, cwd=str(sedfit_dir), stdout=fh,
+            stderr=subprocess.STDOUT, text=True,
+        )
     if proc.returncode != 0:
+        tail = _tail(run_log)
         raise RuntimeError(
-            f"FAST++ failed (exit {proc.returncode}).\nstdout:\n{proc.stdout}\n"
-            f"stderr:\n{proc.stderr}"
+            f"FAST++ failed (exit {proc.returncode}). See {run_log}\n"
+            f"--- last lines ---\n{tail}"
         )
 
     fout_path = sedfit_dir / f"{catalog}.fout"
@@ -141,6 +171,7 @@ def run_fastpp(cfg: VACConfig, tile: str, *, name_zphot: str = "z_phot") -> tupl
         "name_zphot": name_zphot,
         "binary": str(cfg.fastpp_bin),
         "n_fits": len(fout),
+        "run_log": str(run_log),
         "params": overrides,
     }
     return Table(fout), fastpp_info

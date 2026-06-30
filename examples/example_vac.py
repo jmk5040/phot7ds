@@ -19,7 +19,7 @@ Edit the constants below for your system. Paths are resolved relative to
 this file where possible; the EAzY/FAST++ ``LIB`` tree and external
 reference catalogs must be supplied by the user.
 """
-
+#%%
 from __future__ import annotations
 
 import logging
@@ -34,12 +34,20 @@ if str(_PHOT7DS_ROOT) not in sys.path:
 
 from phot7ds.vac import VACConfig, run_value_added  # noqa: E402
 
-# --- user settings ------------------------------------------------------
-TILE = "T00236"
+#%% --- user settings ------------------------------------------------------
+import os, glob
+import numpy as np
+path_cat = '/data/data1/7DS/RIS/catalog/'
+sdss_tiles = [os.path.basename(f).split('_')[0] for f in sorted(glob.glob(f"{path_cat}sdss_spec/*_spectra"))]
+len(sdss_tiles)
+dp2_tiles = [os.path.basename(f) for f in sorted(glob.glob(f"/data/data2/RIS/DP2/T*"))]
+tiles = list(np.intersect1d(sdss_tiles, dp2_tiles))
+#%%
+TILE = tiles[-1]
 DETECTION_REF = "7DS"  # tag used in the catalog file names
 
 # phot7ds photometric catalog for the tile (FITS).
-CATALOG_PATH = f"/data/data1/7DS/RIS/catalog/7ds/{TILE}/{TILE}_{DETECTION_REF}_phot.fits"
+CATALOG_PATH = f"/data/data2/RIS/DP2/{TILE}/{TILE}_{DETECTION_REF}_phot.fits"
 
 # Tile-definition table (polygon corners + center).
 TILE_TABLE = "/data/data1/7DS/RIS/config/7DT_tiles.fits"
