@@ -43,71 +43,72 @@ len(sdss_tiles)
 dp2_tiles = [os.path.basename(f) for f in sorted(glob.glob(f"/data/data2/RIS/DP2/T*"))]
 tiles = list(np.intersect1d(sdss_tiles, dp2_tiles))
 #%%
-TILE = tiles[-1]
-DETECTION_REF = "7DS"  # tag used in the catalog file names
+# TILE = tiles[0]
+for TILE in tiles:
+    DETECTION_REF = "7DS"  # tag used in the catalog file names
 
-# phot7ds photometric catalog for the tile (FITS).
-CATALOG_PATH = f"/data/data2/RIS/DP2/{TILE}/{TILE}_{DETECTION_REF}_phot.fits"
+    # phot7ds photometric catalog for the tile (FITS).
+    CATALOG_PATH = f"/data/data2/RIS/DP2/{TILE}/{TILE}_{DETECTION_REF}_phot.fits"
 
-# Tile-definition table (polygon corners + center).
-TILE_TABLE = "/data/data1/7DS/RIS/config/7DT_tiles.fits"
+    # Tile-definition table (polygon corners + center).
+    TILE_TABLE = "/data/data1/7DS/RIS/config/7DT_tiles.fits"
 
-# EAzY/FAST++ config tree and external reference catalogs.
-LIB_DIR = "/data/data1/7DS/RIS/config/LIB"
-CATALOG_DIR = "/data/data1/7DS/RIS/catalog"
-OUTPUT_ROOT = "/data/data1/7DS/RIS/results/vac"
-FASTPP_BIN = "/home/jmkastro/fastpp/bin/fast++"
-# Auto-download missing external catalogs (REGALADE/VHS/GALEX) via VizieR.
-AUTO_DOWNLOAD = True
-# Toggle the heavy stages.
-DO_PHOTOZ = True
-DO_SEDFIT = True
-# -----------------------------------------------------------------------
-
-
-def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
-    )
-
-    config = VACConfig(
-        lib_dir=LIB_DIR,
-        catalog_dir=CATALOG_DIR,
-        output_root=OUTPUT_ROOT,
-        fastpp_bin=FASTPP_BIN,
-        detection_ref=DETECTION_REF,
-        aperture="aper05c",
-        # The 7DS filters that enter the fit are auto-detected from the
-        # catalog's <aperture>_mag_* columns (no use_medium/use_broad needed).
-        use_vhs=True,
-        use_galex=True,
-        use_wise=True,
-        # Fetch absent REGALADE/VHS/GALEX catalogs on demand.
-        auto_download=AUTO_DOWNLOAD,
-        # Default magnitude prior: 7DS m625 (prior_m6250_extend.dat). When
-        # aper05c_mag_m625 is absent the run proceeds without a prior.
-        prior_band="m625",
-        n_proc=8,
-    )
-
-    result = run_value_added(
-        catalog_path=CATALOG_PATH,
-        tile=TILE,
-        tile_table=TILE_TABLE,
-        config=config,
-        do_photoz=DO_PHOTOZ,
-        do_sedfit=DO_SEDFIT,
-    )
-
-    print("\n=== value-added catalog summary ===")
-    print(f"tile         : {result.tile}")
-    print(f"matched gals : {result.n_matched}")
-    print(f"flux sources : {result.n_flux}")
-    print(f"photo-z done : {result.photoz_done}")
-    print(f"SED fit done : {result.sedfit_done}")
-    print(f"output       : {result.value_added_path}")
-    print(f"run log      : {result.log_path}")
+    # EAzY/FAST++ config tree and external reference catalogs.
+    LIB_DIR = "/data/data1/7DS/RIS/config/LIB"
+    CATALOG_DIR = "/data/data1/7DS/RIS/catalog"
+    OUTPUT_ROOT = "/data/data1/7DS/RIS/results/vac"
+    FASTPP_BIN = "/home/jmkastro/fastpp/bin/fast++"
+    # Auto-download missing external catalogs (REGALADE/VHS/GALEX) via VizieR.
+    AUTO_DOWNLOAD = True
+    # Toggle the heavy stages.
+    DO_PHOTOZ = True
+    DO_SEDFIT = True
+    # -----------------------------------------------------------------------
 
 
-if __name__ == "__main__":
-    main()
+    def main() -> None:
+        logging.basicConfig(
+            level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+        )
+
+        config = VACConfig(
+            lib_dir=LIB_DIR,
+            catalog_dir=CATALOG_DIR,
+            output_root=OUTPUT_ROOT,
+            fastpp_bin=FASTPP_BIN,
+            detection_ref=DETECTION_REF,
+            aperture="aper05c",
+            # The 7DS filters that enter the fit are auto-detected from the
+            # catalog's <aperture>_mag_* columns (no use_medium/use_broad needed).
+            use_vhs=True,
+            use_galex=True,
+            use_wise=True,
+            # Fetch absent REGALADE/VHS/GALEX catalogs on demand.
+            auto_download=AUTO_DOWNLOAD,
+            # Default magnitude prior: 7DS m625 (prior_m6250_extend.dat). When
+            # aper05c_mag_m625 is absent the run proceeds without a prior.
+            prior_band="m625",
+            n_proc=8,
+        )
+
+        result = run_value_added(
+            catalog_path=CATALOG_PATH,
+            tile=TILE,
+            tile_table=TILE_TABLE,
+            config=config,
+            do_photoz=DO_PHOTOZ,
+            do_sedfit=DO_SEDFIT,
+        )
+
+        print("\n=== value-added catalog summary ===")
+        print(f"tile         : {result.tile}")
+        print(f"matched gals : {result.n_matched}")
+        print(f"flux sources : {result.n_flux}")
+        print(f"photo-z done : {result.photoz_done}")
+        print(f"SED fit done : {result.sedfit_done}")
+        print(f"output       : {result.value_added_path}")
+        print(f"run log      : {result.log_path}")
+
+
+    if __name__ == "__main__":
+        main()

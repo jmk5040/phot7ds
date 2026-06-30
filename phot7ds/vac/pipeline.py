@@ -74,10 +74,10 @@ def run_value_added(
     -------
     VACResult
     """
-    config.validate(
-        require_fastpp=do_sedfit,
-        require_eazy_bin=do_photoz and config.photoz_engine == "binary",
-    )
+    # Up-front sanity check: verify every required config file / template /
+    # binary for the requested stages, reporting all problems at once before
+    # any long-running work begins.
+    config.preflight(do_photoz=do_photoz, do_sedfit=do_sedfit)
 
     if not isinstance(tile_table, Table):
         tile_table = Table.read(tile_table)

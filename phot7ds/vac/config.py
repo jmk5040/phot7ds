@@ -8,11 +8,14 @@ mirroring :mod:`phot7ds.config_io`.
 """
 from __future__ import annotations
 
+import logging
 import os
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 # Default 7DS medium-band set (m400..m875, 25 nm steps).
 DEFAULT_MEDIUM_BANDS: tuple[str, ...] = tuple(f"m{w}" for w in range(400, 900, 25))
@@ -277,50 +280,173 @@ class VACConfig:
         return Path(self.catalog_dir) / self.galex_subdir / self.galex_template.format(tile=tile)
 
     # ------------------------------------------------------------------
-    # Validation
+    # Validation / preflight
     # ------------------------------------------------------------------
     def eazy_bin_ok(self) -> bool:
         """True when ``eazy_bin`` exists and is an executable file."""
         path = str(self.eazy_bin)
         return os.path.isfile(path) and os.access(path, os.X_OK)
 
+    def _requirement_list(
+        self, *, do_photoz: bool, do_sedfit: bool, deep: bool
+    ) -> list[tuple[str, Path, bool, str]]:
+        """Every required input as ``(label, path, ok, kind)`` tuples.
+
+        ``kind`` is ``"dir"``, ``"file"`` or ``"exe"``; ``ok`` reflects
+        existence (and the executable bit for ``"exe"``). Per-tile external
+        catalogs (REGALADE/VHS/GALEX) are intentionally excluded — they are
+        tile-specific and fetched/checked during the run.
+        """
+        reqs: list[tuple[str, Path, bool, str]] = []
+
+        def add(label: str, path, kind: str) -> None:
+            p = Path(path)
+            if kind == "dir":
+                ok = p.is_dir()
+            elif kind == "exe":
+                ok = p.is_file() and os.access(str(p), os.X_OK)
+            else:
+                ok = p.is_file()
+            reqs.append((label, p, ok, kind))
+
+        # Always needed (config tree shared by both stages).
+        add("LIB directory", self.lib_path, "dir")
+        add("FILTER.RES.latest", self.filters_res, "file")
+        add("FILTER.RES.latest.info", self.filters_res_info, "file")
+        add("default.translate", self.translate_file, "file")
+        add("SFD dust map directory", self.sfd_path, "dir")
+
+        if do_photoz:
+            tmpl = self.lib_path / "templates"
+            add("EAzY zphot.param template", self.eazy_param_template, "file")
+            add("EAzY magnitude prior", self.prior_path, "file")
+            add("EAzY templates definition",
+                tmpl / "eazy_v1.2_dusty.spectra.param", "file")
+            add("EAzY wavelength grid",
+                tmpl / "EAZY_v1.1_lines" / "lambda_v1.1.def", "file")
+            add("EAzY template-error file", tmpl / "TEMPLATE_ERROR.eazy_v1.0", "file")
+            add("EAzY IGM LAF coefficients", tmpl / "LAFcoeff.txt", "file")
+            add("EAzY IGM DLA coefficients", tmpl / "DLAcoeff.txt", "file")
+            if self.photoz_engine == "binary":
+                add("EAzY binary (photoz_engine='binary')", self.eazy_bin, "exe")
+            if deep:
+                reqs += self._eazy_template_spectra_reqs(
+                    tmpl / "eazy_v1.2_dusty.spectra.param"
+                )
+
+        if do_sedfit:
+            add("FAST++ binary", self.fastpp_bin, "exe")
+            add("FAST++ fastpp.param template", self.fastpp_param_template, "file")
+            # NB: resolved from the fast++ install's share/ dir by default; a
+            # mismatched install prefix is a common cross-machine failure.
+            add("FAST++ template-error file (fastpp_share)",
+                self.fastpp_share / "TEMPLATE_ERROR.fast.v0.2", "file")
+            add("FAST++ SPS library directory (fastpp_libraries)",
+                self.fastpp_libraries, "dir")
+
+        return reqs
+
+    def _eazy_template_spectra_reqs(
+        self, spectra_file
+    ) -> list[tuple[str, Path, bool, str]]:
+        """Check each template spectrum path listed in the SED definition.
+
+        ``eazy_v1.2_dusty.spectra.param`` references the individual template
+        ``.dat`` files by (often absolute) path; copying the LIB tree to a
+        different root on another machine silently breaks these. Returns one
+        requirement per listed template (empty if the definition is absent —
+        that absence is already reported separately).
+        """
+        reqs: list[tuple[str, Path, bool, str]] = []
+        p = Path(spectra_file)
+        if not p.is_file():
+            return reqs
+        try:
+            for line in p.read_text().splitlines():
+                s = line.strip()
+                if not s or s.startswith("#"):
+                    continue
+                parts = s.split()
+                if len(parts) < 2:
+                    continue
+                tpath = Path(parts[1])
+                reqs.append(
+                    (f"EAzY template spectrum #{parts[0]}", tpath, tpath.is_file(),
+                     "file")
+                )
+        except OSError:
+            pass
+        return reqs
+
+    def check_requirements(
+        self, *, do_photoz: bool = True, do_sedfit: bool = True, deep: bool = True
+    ) -> list[str]:
+        """Return a list of missing/invalid required inputs (empty == all OK).
+
+        Non-raising counterpart of :meth:`preflight`; useful for programmatic
+        checks. Also verifies the eazy-py import when
+        ``photoz_engine == "eazy-py"``.
+        """
+        problems: list[str] = []
+        nouns = {"dir": "directory", "exe": "executable", "file": "file"}
+        for label, path, ok, kind in self._requirement_list(
+            do_photoz=do_photoz, do_sedfit=do_sedfit, deep=deep
+        ):
+            if not ok:
+                problems.append(f"{label}: missing {nouns[kind]} -> {path}")
+        if do_photoz and self.photoz_engine == "eazy-py":
+            try:
+                import eazy  # noqa: F401
+            except Exception as exc:  # pragma: no cover - import-time/env issue
+                problems.append(
+                    f"eazy-py not importable (photoz_engine='eazy-py'): {exc!r}"
+                )
+        return problems
+
+    def preflight(
+        self, *, do_photoz: bool = True, do_sedfit: bool = True,
+        deep: bool = True, strict: bool = True, verbose: bool = True,
+    ) -> list[str]:
+        """Check every required config file / template / binary up front.
+
+        Logs a per-item ``OK``/``MISS`` checklist (``verbose``) and, when
+        ``strict`` (default), raises :class:`FileNotFoundError` listing **all**
+        problems at once — so path issues surface before any long-running
+        stage instead of mid-run. Returns the list of problems.
+        """
+        reqs = self._requirement_list(
+            do_photoz=do_photoz, do_sedfit=do_sedfit, deep=deep
+        )
+        if verbose:
+            log.info("VAC preflight: %d required inputs (photo-z=%s, SED-fit=%s, "
+                     "engine=%s)", len(reqs), do_photoz, do_sedfit,
+                     self.photoz_engine)
+            for label, path, ok, _kind in reqs:
+                log.info("  [%s] %s: %s", "OK  " if ok else "MISS", label, path)
+        problems = self.check_requirements(
+            do_photoz=do_photoz, do_sedfit=do_sedfit, deep=deep
+        )
+        if problems and strict:
+            bullets = "\n  - ".join(problems)
+            raise FileNotFoundError(
+                f"VAC preflight failed: {len(problems)} required input(s) missing "
+                f"or invalid:\n  - {bullets}\n"
+                "Fix the paths above via VACConfig (lib_dir / sfd_dir / fastpp_bin "
+                "/ fastpp_share_dir / fastpp_library_dir / eazy_bin), then re-run."
+            )
+        return problems
+
     def validate(self, *, require_fastpp: bool = True,
                  require_eazy_bin: bool = False) -> None:
-        """Check that required config files / binaries exist.
+        """Back-compat thin wrapper around :meth:`preflight`.
 
-        Raises :class:`FileNotFoundError` with a helpful message when a
-        required input is missing. External per-tile catalogs are checked
-        lazily during the run (REGALADE required, VHS/GALEX optional).
-
-        ``require_eazy_bin`` checks the compiled EAzY executable, needed when
-        the photo-z stage runs with ``photoz_engine == "binary"``.
+        Kept for existing callers; new code should call :meth:`preflight`
+        directly. ``require_eazy_bin`` is accepted for compatibility but the
+        EAzY binary is now checked automatically whenever the photo-z stage
+        uses ``photoz_engine == "binary"``.
         """
-        required = [
-            (self.lib_path, "EAzY/FAST++ LIB directory"),
-            (self.filters_res, "EAzY FILTER.RES.latest"),
-            (self.filters_res_info, "EAzY FILTER.RES.latest.info"),
-            (self.translate_file, "EAzY default.translate"),
-            (self.eazy_param_template, "EAzY zphot.param template"),
-            (self.sfd_path, "SFD dust map directory"),
-        ]
-        for path, what in required:
-            if not Path(path).exists():
-                raise FileNotFoundError(
-                    f"{what} not found at {path}. Set VACConfig.lib_dir / sfd_dir "
-                    "to the directory holding your EAzY/FAST++ LIB tree."
-                )
-        if require_fastpp and not Path(self.fastpp_bin).exists():
-            raise FileNotFoundError(
-                f"FAST++ binary not found at {self.fastpp_bin}. Install FAST++ "
-                "and set VACConfig.fastpp_bin, or run with do_sedfit=False."
-            )
-        if require_eazy_bin and not self.eazy_bin_ok():
-            raise FileNotFoundError(
-                f"EAzY executable not found / not executable at {self.eazy_bin}. "
-                "Build the compiled eazy executable and set VACConfig.eazy_bin, "
-                "or set VACConfig.photoz_engine='eazy-py' to use the pure-Python "
-                "path."
-            )
+        self.preflight(do_photoz=True, do_sedfit=require_fastpp, deep=False,
+                       strict=True, verbose=False)
 
 
 __all__ = ["VACConfig", "DEFAULT_MEDIUM_BANDS", "DEFAULT_BROAD_BANDS"]

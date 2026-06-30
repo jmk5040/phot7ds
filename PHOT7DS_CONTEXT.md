@@ -230,6 +230,16 @@ phot7ds/
    instead of buffering in memory. The `*_vac.log` run log is still written
    only once at the end of a successful run.
 
+4. `vac/config.py`: added an up-front **preflight** sanity check
+   (`VACConfig.preflight()` / `.check_requirements()`), called at the start of
+   `run_value_added`. It collects **all** missing config/template/binary
+   inputs at once (LIB tree, SFD, EAzY templates+prior+IGM+binary, FAST++
+   binary + `fastpp.param` + `TEMPLATE_ERROR.fast.v0.2` from `fastpp_share`
+   + SPS library dir; deep mode also checks each spectrum in
+   `eazy_v1.2_dusty.spectra.param`) and raises one `FileNotFoundError` listing
+   them — fixing cross-machine path failures surfacing mid-run. `validate()`
+   is now a back-compat wrapper over `preflight()`.
+
 ## 10. Open / possible next steps
 
 - Consider lowering `fill_delve_detection_gaps` default overlap for *full*

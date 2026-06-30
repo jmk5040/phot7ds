@@ -526,6 +526,35 @@ print(result.n_matched, result.n_flux)
 
 A runnable version is in `examples/example_vac.py`.
 
+### Preflight checks (config sanity)
+
+`run_value_added` calls `config.preflight(...)` before any work begins, so
+missing paths fail fast with a single, complete report instead of cryptic
+mid-run errors (e.g. FAST++ being unable to open
+`TEMPLATE_ERROR.fast.v0.2`). It verifies, for the requested stages, the LIB
+tree (`FILTER.RES.latest[.info]`, `default.translate`, SFD maps), the EAzY
+templates/prior/IGM files and binary, and the FAST++ binary, `fastpp.param`
+template, template-error file (resolved from `fastpp_share`), and SPS
+library dir — and (with `deep=True`) the individual template spectra listed
+in `eazy_v1.2_dusty.spectra.param`, which catches a LIB tree copied to a
+different root. Per-tile reference catalogs (REGALADE/VHS/GALEX) are checked
+during the run, not here.
+
+Run it yourself before a batch:
+
+```python
+problems = config.preflight(do_photoz=True, do_sedfit=True, strict=False)
+if problems:
+    for p in problems:
+        print("MISSING:", p)
+```
+
+With `strict=True` (the default) it raises `FileNotFoundError` listing every
+problem; `config.check_requirements(...)` is the non-logging, non-raising
+variant. Common fixes are `VACConfig.fastpp_share_dir` (when the `fast++`
+install prefix differs from the default `<fastpp_bin>/../../share`),
+`fastpp_library_dir`, `eazy_bin`, `lib_dir`, and `sfd_dir`.
+
 ### Pipeline stages
 
 1. **Cross-match** (`crossmatch.py`) — match the catalog to REGALADE
