@@ -598,11 +598,13 @@ toggle is on. The legacy `use_medium` / `use_broad` toggles are ignored.
 ### On-demand external catalogs (VizieR)
 
 With `auto_download=True`, a per-tile reference catalog that is **absent** at
-its expected path is fetched via the project's `Query/Vizier_Query.py`
-helper (path set by `vizier_query_path`) before matching. Supported keys:
-`regalade`, `vhs`, `galex`. Download failures are non-fatal for the optional
-catalogs (the run proceeds and skips those bands); a missing **REGALADE**
-catalog still raises.
+its expected path is fetched by the in-package VizieR querier
+(`phot7ds.vac.vizier`, which needs `astroquery` from the `vac` extra) before
+matching: the catalog is queried inside the tile bounding box and trimmed to
+the tile polygon. Supported keys: `regalade`, `vhs`, `galex` (see
+`vac.vizier.CATALOG_PRESETS`). Download failures are non-fatal for the
+optional catalogs (the run proceeds and skips those bands); a missing
+**REGALADE** catalog still raises.
 
 ### Magnitude prior and the redshift column
 

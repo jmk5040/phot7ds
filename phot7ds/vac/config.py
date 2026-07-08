@@ -53,8 +53,9 @@ class VACConfig:
         ``use_medium`` / ``use_broad`` are ignored (kept for back-compat).
         ``medium_bands`` is still used to pick the dedup reference band.
     auto_download
-        When True, fetch absent REGALADE/VHS/GALEX catalogs via VizieR
-        (``vizier_query_path``) before matching.
+        When True, fetch absent REGALADE/VHS/GALEX catalogs via the
+        in-package VizieR querier (:mod:`phot7ds.vac.vizier`, needs
+        ``astroquery``) before matching.
     prior_band, prior_file
         Magnitude-prior band (default ``m625``) and prior table (default
         ``templates/prior_m6250_extend.dat``).
@@ -121,9 +122,9 @@ class VACConfig:
 
     # External-catalog auto-download (VizieR). When a per-tile reference
     # catalog is absent at its expected path and ``auto_download`` is True,
-    # it is fetched via the Query/Vizier_Query.py helper before matching.
+    # it is fetched via the in-package VizieR querier (``vac.vizier``,
+    # requires ``astroquery``) before matching.
     auto_download: bool = False
-    vizier_query_path: str | Path = "/data/data1/7DS/RIS/script/Query/Vizier_Query.py"
 
     # Magnitude prior (eazy). Default is the 7DS m625 prior; when the prior
     # band's flux is absent the run proceeds without a prior (see photoz.py).
@@ -151,6 +152,13 @@ class VACConfig:
     fastpp_force_zphot: bool = True        # fit only at the EAzY photo-z
     fastpp_parallel: str = "generators"    # suits many models + few sources
     fastpp_metal: tuple[float, ...] = (0.004, 0.008, 0.02, 0.05)
+    # Save the best-fit model SEDs. FAST++ writes one
+    # ``best_fits/<catalog>_<id>.fit`` per source (columns ``wl fl`` [+
+    # ``fl_nodust`` when ``fastpp_intrinsic_best_fit``], F_lambda observed
+    # frame). Enabled by default so the modelled spectra are available for
+    # inspection / comparison with observed spectra.
+    fastpp_best_fit: bool = True
+    fastpp_intrinsic_best_fit: bool = True  # also emit the dust-free model
 
     # Photo-z engine. "binary" shells out to the compiled EAzY executable
     # (``eazy_bin``) and is the default: the pure-Python eazy-py TemplateGrid

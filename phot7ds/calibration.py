@@ -192,6 +192,7 @@ def calibrate_zeropoints(
     match_radius_arcsec: float = 1.0,
     mag_range: tuple[float, float] = (12.0, 16.0),
     spatial_poly_degree: int = 2,
+    band_flag_cut: int = 0,
     plot_residuals: bool = False,
     plot_dir: str | None = None,
     plot_title_extra: str = "",
@@ -201,7 +202,7 @@ def calibrate_zeropoints(
     For each ``(band, aperture)``:
 
     1. Build a clean calibration subset: position-matched within
-       ``match_radius_arcsec``, ``source_flags == 0``,
+       ``match_radius_arcsec``,
        per-band per-aperture ``flags == 0``, reference magnitude in
        ``mag_range``.
     2. Fit a 2-D spatial ZP and store the corrected column
@@ -230,7 +231,7 @@ def calibrate_zeropoints(
         incoord_ra, incoord_dec, refcoord_ra, refcoord_dec,
         match_radius_arcsec=match_radius_arcsec,
     )
-    clean_mask = matched_mask & (np.asarray(cat["source_flags"]) == 0)
+    clean_mask = matched_mask# & (np.asarray(cat["source_flags"]) == 0) # deleted source_flags
 
     for band in band_names:
         band_ref = band.split("-")[0]
@@ -251,7 +252,7 @@ def calibrate_zeropoints(
                 log.warning("Missing %s; skipping calibration", flag_col)
                 continue
             zmask = clean_mask.copy()
-            zmask &= np.asarray(cat[flag_col]) == 0
+            zmask &= np.asarray(cat[flag_col]) <= band_flag_cut
             zmask &= np.isfinite(gaia_mag_all)
             zmask &= gaia_mag_all > mag_range[0]
             zmask &= gaia_mag_all < mag_range[1]

@@ -170,6 +170,12 @@ phot7ds/
   of 8 templates in 242 s on T22956 (803 rows, 27 filters), long before
   `fit_catalog` started. It is the grid build that is slow, NOT the ZP
   offsets (eazy-py never iterates ZP here) and NOT `fit_catalog`.
+- VizieR auto-download is **self-contained** in `vac/vizier.py` (presets
+  `CATALOG_PRESETS` for regalade/vhs/galex + `query_vizier_catalog_for_tile`
+  / `download_catalog_for_tile`); `astroquery` is imported lazily and is in
+  the `vac` extra. No longer depends on the external `Query/Vizier_Query.py`
+  (the old `VACConfig.vizier_query_path` field was removed). Polygon trim
+  reuses `phot7ds.tile_geometry.trim_to_tile_polygon`.
 - Filters: broad bands use `f_7DS_g/r/i` (not `f_SDSS_*`). `FILTER.RES.latest`
   and `default.translate` were updated by `update_7ds_filters.py`; keep the two
   files in sync (a prior desync was missing `f_7DS_g/r/i`).
@@ -239,6 +245,12 @@ phot7ds/
    `eazy_v1.2_dusty.spectra.param`) and raises one `FileNotFoundError` listing
    them — fixing cross-machine path failures surfacing mid-run. `validate()`
    is now a back-compat wrapper over `preflight()`.
+
+5. `vac/vizier.py`: internalized the VizieR querying (presets + tile-polygon
+   query/download) into the package; dropped the dependency on the external
+   `Query/Vizier_Query.py` and removed `VACConfig.vizier_query_path`. Added
+   `astroquery` to the `vac` extra (imported lazily). Verified a live REGALADE
+   download for T22956 (4071 sources).
 
 ## 10. Open / possible next steps
 

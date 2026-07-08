@@ -89,6 +89,11 @@ for TILE in tiles:
             # aper05c_mag_m625 is absent the run proceeds without a prior.
             prior_band="m625",
             n_proc=8,
+            # Redshift grid: widen to z in [0.01, 2.0] (was [0.01, 1.0]) for
+            # both EAzY and FAST++. Best-fit model SEDs are saved (BEST_FIT=1,
+            # default) under fastpp/<tile>/best_fits/.
+            z_min=0.01,
+            z_max=2.0,
         )
 
         result = run_value_added(

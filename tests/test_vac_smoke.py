@@ -142,11 +142,13 @@ def test_external_enabled_respects_toggles() -> None:
 
 
 def test_vizier_preset_mapping() -> None:
-    from phot7ds.vac.vizier import _PRESET_KEYS
+    from phot7ds.vac.vizier import CATALOG_PRESETS
 
-    assert _PRESET_KEYS["regalade"] == "regalade"
-    assert _PRESET_KEYS["vhs"] == "vhs"
-    assert _PRESET_KEYS["galex"] == "galex"
+    for key in ("regalade", "vhs", "galex"):
+        assert key in CATALOG_PRESETS
+        assert CATALOG_PRESETS[key].key == key
+        assert CATALOG_PRESETS[key].vizier_id  # non-empty VizieR id
+    assert CATALOG_PRESETS["regalade"].vizier_id == "J/A+A/706/A284/regalade"
 
 
 def test_ensure_external_catalog_noop_when_present(tmp_path) -> None:

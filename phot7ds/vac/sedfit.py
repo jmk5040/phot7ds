@@ -74,6 +74,9 @@ def _build_overrides(cfg: VACConfig, catalog: str, name_zphot: str) -> dict:
         "Z_STEP": cfg.z_step,
         "Z_STEP_TYPE": cfg.z_step_type,
         "N_THREAD": cfg.n_proc,
+        # Save the best-fit model SEDs (one file per source under best_fits/).
+        "BEST_FIT": cfg.fastpp_best_fit,
+        "INTRINSIC_BEST_FIT": cfg.fastpp_intrinsic_best_fit,
     }
     overrides.update(cfg.fastpp_params)
     return overrides
