@@ -2,7 +2,7 @@
 
 Working memory for the `phot7ds` package and the 7DS/RIS scripts around it.
 Read this first when starting a new session. Version at time of writing:
-**phot7ds 0.4.0** (`phot7ds/__init__.py`, `pyproject.toml`).
+**phot7ds 0.5.0** (`phot7ds/__init__.py`, `pyproject.toml`).
 
 ---
 
