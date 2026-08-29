@@ -33,11 +33,23 @@ _PHOT7DS_ROOT = _HERE.parent
 if str(_PHOT7DS_ROOT) not in sys.path:
     sys.path.insert(0, str(_PHOT7DS_ROOT))
 
-from phot7ds.vac import VACConfig, run_value_added  # noqa: E402
+from phot7ds.vac import (  # noqa: E402
+    VACConfig,
+    prefetch_references,
+    resolve_vhs_mag_set,
+    run_value_added,
+)
 
 #%% --- user settings ------------------------------------------------------
 TILE = "T00236"
 DETECTION_REF = "7DS"  # tag used in the catalog file names
+
+# Catalog aperture feeding the fit. The VHS bands are paired with it so that
+# both measure the same kind of light: 'aper05c' (fixed) with the VHS 5.7"
+# aperture, 'auto'/'autoc' (Kron, total) with the VHS Petrosian magnitudes.
+# Mixing them tilts the optical-to-NIR slope by aperture alone, and the
+# photo-z absorbs the difference as redshift.
+APERTURE = "aper05c"
 
 # phot7ds photometric catalog for the tile (FITS), as written by
 # ``run_photometry`` / ``examples/example_run.py``.
@@ -57,8 +69,11 @@ OUTPUT_ROOT = "/path_res/.../vac"
 FASTPP_BIN = None
 EAZY_BIN = None
 
-# Auto-download missing external catalogs (REGALADE/VHS/GALEX) via VizieR.
-AUTO_DOWNLOAD = True
+# Stage the missing VHS/GALEX references up front, under a bounded time
+# limit, instead of letting the fitting stages reach for the network. For a
+# single tile either way works; across a batch the prefetch keeps one flaky
+# VizieR query from stalling the run part-way through.
+PREFETCH = True
 # Toggle the heavy stages.
 DO_PHOTOZ = True
 DO_SEDFIT = True
@@ -78,24 +93,34 @@ def main() -> None:
         fastpp_bin=FASTPP_BIN,
         eazy_bin=EAZY_BIN,
         detection_ref=DETECTION_REF,
-        aperture="aper05c",
+        aperture=APERTURE,
+        vhs_mag_set=resolve_vhs_mag_set(APERTURE),
         # The 7DS filters that enter the fit are auto-detected from the
         # catalog's <aperture>_mag_* columns (no use_medium/use_broad needed).
         use_vhs=True,
         use_galex=True,
         use_wise=True,
-        # Fetch absent REGALADE/VHS/GALEX catalogs on demand.
-        auto_download=AUTO_DOWNLOAD,
+        # Everything is staged by the prefetch pass below instead.
+        auto_download=not PREFETCH,
         # Magnitude prior: the packaged 7DS m625 prior (SDSS DR16 + DESI DR1
         # BGS). When aper05c_mag_m625 is absent the run proceeds without a
         # prior. Point ``prior_file`` elsewhere to override it.
         prior_band="m625",
+        # Require 80% of the *7DS* bands, counting VHS/GALEX/WISE as a bonus.
+        # Safer than the all-filter min_filter_fraction when tiles differ in
+        # band coverage, since a tile cannot be held to filters it never had.
+        min_7ds_band_fraction=0.80,
         n_proc=8,
         # Redshift grid shared by EAzY and FAST++. Best-fit model SEDs are
         # saved (BEST_FIT=1, default) under fastpp/<tile>/best_fits/.
         z_min=0.01,
         z_max=1.0,
     )
+
+    if PREFETCH:
+        staged = prefetch_references([TILE], TILE_TABLE, config,
+                                     keys=("vhs", "galex"))
+        print(f"staged references: {staged[TILE]}")
 
     result = run_value_added(
         catalog_path=CATALOG_PATH,
@@ -104,6 +129,9 @@ def main() -> None:
         config=config,
         do_photoz=DO_PHOTOZ,
         do_sedfit=DO_SEDFIT,
+        # Drop bands whose columns exist but are entirely empty, so the
+        # coverage cut counts only filters the tile actually has.
+        drop_empty_bands=True,
     )
 
     print("\n=== value-added catalog summary ===")

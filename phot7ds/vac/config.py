@@ -37,6 +37,27 @@ EAZY_BIN_ENV = "PHOT7DS_EAZY_BIN"
 FASTPP_BIN_NAMES = ("fast++",)
 EAZY_BIN_NAMES = ("eazy",)
 
+# Which VHS magnitudes enter the SED, and where the matching staged catalog
+# lives. The two sets measure different light, so they are staged separately:
+# the ap6 files carry extra columns VizieR does not return by default.
+VHS_MAG_SETS: tuple[str, ...] = ("petro", "ap6")
+VHS_STAGING: dict[str, tuple[str, str]] = {
+    "petro": ("vhs_dr5", "{tile}_vhs_dr5.fits"),
+    "ap6": ("vhs_dr5_ap6", "{tile}_vhs_dr5_ap6.fits"),
+}
+
+
+def resolve_vhs_mag_set(aperture: str) -> str:
+    """Pick the VHS magnitude set that matches a 7DS aperture.
+
+    A fixed 7DS aperture (``aper05c``, a 5.0″ *diameter* circle) is paired
+    with the VHS 5.7″ aperture; Kron/total 7DS magnitudes (``auto``/``autoc``)
+    are paired with the VHS Petrosian ones. Mixing them tilts the
+    optical-to-NIR slope by aperture alone, which the photo-z then absorbs as
+    redshift.
+    """
+    return "ap6" if aperture.startswith("aper") else "petro"
+
 
 def _discover_binary(env_var: str, names: tuple[str, ...]) -> str | None:
     """Locate an external executable from the environment or ``$PATH``.
@@ -101,8 +122,15 @@ class VACConfig:
         Cross-match radius for all reference catalogs.
     error_margin
         Magnitude error floor added in quadrature-free fashion to all bands.
-    min_filter_fraction
-        Minimum fraction of measured filters required to keep a source.
+    vhs_mag_set
+        ``"petro"`` (total light, pairs with ``auto``/``autoc``) or ``"ap6"``
+        (5.7″ aperture, pairs with a fixed ``aper05c``). See
+        :func:`resolve_vhs_mag_set`.
+    min_filter_fraction, min_7ds_band_fraction
+        Coverage cut. By default a source must have
+        ``min_filter_fraction`` of *all* filters measured; setting
+        ``min_7ds_band_fraction`` expresses the requirement against the 7DS
+        bands alone and counts external surveys as a bonus.
     z_min, z_max, z_step
         Redshift grid shared by EAzY and FAST++.
     n_proc
@@ -139,10 +167,23 @@ class VACConfig:
     regalade_dec_key: str = "DEJ2000"
     regalade_name_key: str = "Name"
     regalade_mag_key: str = "rmag"
-    vhs_subdir: str = "vhs_dr5"
-    vhs_template: str = "{tile}_vhs_dr5.fits"
+    # ``None`` follows vhs_mag_set (see VHS_STAGING and the vhs_staging
+    # property); set them to pin an explicit location.
+    vhs_subdir: str | None = None
+    vhs_template: str | None = None
     galex_subdir: str = "galex"
     galex_template: str = "{tile}_galex_ais.fits"
+
+    # Which VHS magnitudes are joined onto the SED. The VHS band has to
+    # measure the same kind of light as the 7DS band next to it, or the
+    # optical-to-NIR slope is tilted by aperture alone and the photo-z absorbs
+    # the difference as redshift:
+    #   "petro" - Petrosian, total light; pairs with auto / autoc
+    #   "ap6"   - 5.7" aperture (Japc6 etc.); pairs with a fixed aper05c
+    # See ``resolve_vhs_mag_set`` for the automatic pairing. The two sets are
+    # staged separately (VHS_STAGING), since the ap6 columns are not in
+    # VizieR's default VHS column set.
+    vhs_mag_set: str = "petro"
 
     # Bands
     #
@@ -175,7 +216,20 @@ class VACConfig:
     match_radius_arcsec: float = 2.0
     error_margin: float = 0.03
     min_filter_fraction: float = 0.80
+    # Alternative to ``min_filter_fraction``, expressed against the **7DS**
+    # bands only, with the external surveys counted as a bonus rather than in
+    # the denominator. Set this when a tile's band coverage varies: a tile
+    # missing g/r/i entirely, or carrying sparse GALEX/VHS references, would
+    # otherwise push ``min_filter_fraction``'s threshold above what the data
+    # can ever reach. ``None`` keeps the plain all-filter fraction.
+    min_7ds_band_fraction: float | None = None
     dedup_by_brightness: bool = True
+
+    # VizieR download budget, applied per query by vac.vizier. astroquery's
+    # client does not reliably honour its own timeout, so the query is also
+    # capped with a hard wall-clock alarm.
+    vizier_timeout: int = 180
+    vizier_attempts: int = 2
 
     # Redshift grid
     z_min: float = 0.01
@@ -225,6 +279,12 @@ class VACConfig:
             self.fastpp_bin = _discover_binary(FASTPP_BIN_ENV, FASTPP_BIN_NAMES)
         if self.eazy_bin is None:
             self.eazy_bin = _discover_binary(EAZY_BIN_ENV, EAZY_BIN_NAMES)
+
+        if self.vhs_mag_set not in VHS_MAG_SETS:
+            raise ValueError(
+                f"vhs_mag_set={self.vhs_mag_set!r} is not one of "
+                f"{', '.join(VHS_MAG_SETS)}."
+            )
 
         # Early, non-fatal heads-up: when the (default) binary photo-z engine
         # is selected but no executable is found at ``eazy_bin``, warn now so
@@ -331,11 +391,39 @@ class VACConfig:
     def regalade_path(self, tile: str) -> Path:
         return Path(self.catalog_dir) / self.regalade_subdir / self.regalade_template.format(tile=tile)
 
+    @property
+    def vhs_staging(self) -> tuple[str, str]:
+        """Resolved ``(subdir, template)`` for the staged VHS catalog.
+
+        Resolved on access rather than pinned in ``__post_init__`` so that
+        ``dataclasses.replace(cfg, vhs_mag_set=...)`` moves the staging with
+        the magnitude set; a pinned value would leave the two disagreeing.
+        """
+        subdir, template = VHS_STAGING[self.vhs_mag_set]
+        return self.vhs_subdir or subdir, self.vhs_template or template
+
     def vhs_path(self, tile: str) -> Path:
-        return Path(self.catalog_dir) / self.vhs_subdir / self.vhs_template.format(tile=tile)
+        subdir, template = self.vhs_staging
+        return Path(self.catalog_dir) / subdir / template.format(tile=tile)
 
     def galex_path(self, tile: str) -> Path:
         return Path(self.catalog_dir) / self.galex_subdir / self.galex_template.format(tile=tile)
+
+    def reference_path(self, key: str, tile: str) -> Path:
+        """Per-tile path of any external reference catalog, by preset key.
+
+        The three references the cross-matcher consumes have configurable
+        locations; anything else (e.g. a catalog staged only for later use)
+        falls back to ``{catalog_dir}/{key}/{tile}_{key}.fits``.
+        """
+        known = {
+            "regalade": self.regalade_path,
+            "vhs": self.vhs_path,
+            "galex": self.galex_path,
+        }
+        if key in known:
+            return known[key](tile)
+        return Path(self.catalog_dir) / key / f"{tile}_{key}.fits"
 
     # ------------------------------------------------------------------
     # Validation / preflight
@@ -536,4 +624,7 @@ __all__ = [
     "PACKAGED_PRIOR",
     "FASTPP_BIN_ENV",
     "EAZY_BIN_ENV",
+    "VHS_MAG_SETS",
+    "VHS_STAGING",
+    "resolve_vhs_mag_set",
 ]

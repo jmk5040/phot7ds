@@ -4,6 +4,82 @@ All notable changes to `phot7ds`. Versions follow
 [semantic versioning](https://semver.org/) loosely: the minor number moves on
 new features or behaviour changes, the patch number on fixes.
 
+## v0.6.0 — 2026-08-29
+
+Promotes the machinery that had accumulated in the RIS production driver
+(`RIS_vac.py`) into the package, so a run no longer depends on a script
+monkey-patching module-level tables. The driver dropped from ~1030 lines to
+~470, and the library gained the aperture-matching, prefetch, dead-band and
+split-stage logic it was reaching around.
+
+### Fixed
+
+- **VizieR tile queries no longer over-fetch near the poles.** The query box
+  used the raw RA span of the tile polygon, which is `1/cos(dec)` times the
+  angular width — a 1.4°-wide tile at dec = −83° was queried over ~12° of RA,
+  roughly an order of magnitude too much sky, enough to stall a dense catalog
+  like VHS DR5. The span is now deprojected by `cos(dec)`
+  (`vizier.tile_query_box`).
+- **VizieR queries can no longer hang a run.** astroquery does not reliably
+  honour its own `timeout` and can stall indefinitely on a half-closed
+  connection. Every query now also runs under a hard `SIGALRM` wall clock
+  (`VACConfig.vizier_timeout`, default 180 s) and is retried
+  `vizier_attempts` (2) times.
+- **VHS Vega→AB offsets are registered for both magnitude sets.** Only the
+  Petrosian column names were listed, so any run using the 5.7″ aperture
+  columns would have left the NIR points on the Vega scale (J off by
+  0.94 mag).
+- The filter-coverage cut is vectorized instead of looping over table rows.
+
+### Added
+
+- **`VACConfig.vhs_mag_set`** — `"petro"` (Petrosian, total light) or `"ap6"`
+  (5.7″ aperture, `Japc6`/`Hapc6`/`Ksapc6`), selecting the VHS columns joined
+  onto the SED, the Vega→AB offsets, the VizieR preset and the staging
+  directory in one field. A VHS band has to measure the same kind of light as
+  the 7DS band next to it: pairing a fixed 7DS aperture with total-light VHS
+  magnitudes tilts the optical-to-NIR slope by aperture alone and the photo-z
+  absorbs the difference as redshift. `resolve_vhs_mag_set(aperture)` returns
+  the matching set. The two sets are staged separately
+  (`config.VHS_STAGING`), since the ap6 columns are outside VizieR's default
+  VHS column set.
+- **`VACConfig.min_7ds_band_fraction`** — expresses the coverage cut against
+  the 7DS bands alone, with the external surveys counted as a bonus rather
+  than in the denominator. `min_filter_fraction` alone can demand more
+  filters than a tile will ever have when band coverage varies: for a tile
+  with no `g`/`r`/`i` coadds the 0.80 all-filter threshold left 40 of 958
+  galaxies.
+- **`fluxes.drop_dead_bands` / `live_bands`**, reachable as
+  `run_value_added(..., drop_empty_bands=True)` — drops magnitude columns
+  that are entirely empty before the filters are detected. An unobserved band
+  still has its column, filled with NaN, and detection works from column
+  presence, so without this the dead bands sat in the coverage denominator.
+- **`vizier.prefetch_references`** — stages every tile's external references
+  up front, under the bounded time limit, so a flaky query cannot stall a
+  long batch part-way through and `auto_download` can be left off during
+  fitting.
+- **`pipeline.run_value_added_split`** — fits the photo-z and SED-fit stages
+  on different photometry (different aperture, VHS magnitude set and `use_*`
+  toggles), cutting both flux catalogs to the galaxies that survive both
+  coverage cuts, since everything downstream is aligned by row order.
+- VizieR presets `vhs_ap6` (a superset of `vhs`, so one matched table can
+  serve both magnitude sets) and `catwise` (CatWISE2020).
+- `VACConfig.reference_path(key, tile)`, `VACConfig.vhs_staging`,
+  `fluxes.external_columns`, `fluxes.write_flux_inputs`,
+  `fluxes.required_filter_count`, `vizier.time_limit`,
+  `pipeline.select_tile_row` — the helpers the driver had been reaching for
+  privately.
+
+### Changed
+
+- `VACConfig.vhs_subdir` / `vhs_template` now default to `None`, meaning
+  "follow `vhs_mag_set`", and are resolved on access (`vhs_staging`) rather
+  than pinned at construction. Pinning them in `__post_init__` would leave
+  `dataclasses.replace(cfg, vhs_mag_set=...)` with a magnitude set and a
+  staging directory that disagree. Setting either field explicitly still wins.
+- `build_flux_catalog(..., write=False)` skips writing the stage inputs, for
+  callers that need to intersect the two stages' row sets first.
+
 ## v0.5.0 — 2026-08-29
 
 Everything that accumulated on `main` after the 0.4.0 version bump, plus a

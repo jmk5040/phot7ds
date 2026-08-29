@@ -2,7 +2,7 @@
 
 Working memory for the `phot7ds` package and the 7DS/RIS scripts around it.
 Read this first when starting a new session. Version at time of writing:
-**phot7ds 0.5.0** (`phot7ds/__init__.py`, `pyproject.toml`).
+**phot7ds 0.6.0** (`phot7ds/__init__.py`, `pyproject.toml`).
 
 ---
 
@@ -177,11 +177,40 @@ phot7ds/
   `fit_catalog` started. It is the grid build that is slow, NOT the ZP
   offsets (eazy-py never iterates ZP here) and NOT `fit_catalog`.
 - VizieR auto-download is **self-contained** in `vac/vizier.py` (presets
-  `CATALOG_PRESETS` for regalade/vhs/galex + `query_vizier_catalog_for_tile`
-  / `download_catalog_for_tile`); `astroquery` is imported lazily and is in
-  the `vac` extra. No longer depends on the external `Query/Vizier_Query.py`
-  (the old `VACConfig.vizier_query_path` field was removed). Polygon trim
-  reuses `phot7ds.tile_geometry.trim_to_tile_polygon`.
+  `CATALOG_PRESETS` for regalade/vhs/vhs_ap6/galex/catwise +
+  `query_vizier_catalog_for_tile` / `download_catalog_for_tile`); `astroquery`
+  is imported lazily and is in the `vac` extra. No longer depends on the
+  external `Query/Vizier_Query.py` (the old `VACConfig.vizier_query_path`
+  field was removed). Polygon trim reuses
+  `phot7ds.tile_geometry.trim_to_tile_polygon`.
+- **VizieR query box** (`tile_query_box`, v0.6.0): the RA span is deprojected
+  by `cos(dec)`. Before that fix a 1.4°-wide tile at dec = −83° was queried
+  over ~12° of RA — an order of magnitude too much sky, enough to stall VHS
+  DR5. Every query also runs under a hard `SIGALRM` cap
+  (`vizier_timeout`, 180 s) with `vizier_attempts` retries, because astroquery
+  can ignore its own timeout and hang. For a batch, call
+  `prefetch_references(...)` first and leave `auto_download=False` during
+  fitting.
+- **VHS aperture matching** (`vhs_mag_set`, v0.6.0): `"petro"` pairs with
+  `auto`/`autoc`, `"ap6"` (`Japc6`/`Hapc6`/`Ksapc6`, 5.7″) pairs with
+  `aper05c`; `resolve_vhs_mag_set(aperture)` does the pairing. Mixing them
+  tilts the optical-to-NIR slope by aperture alone and the photo-z absorbs it
+  as redshift. The two sets stage separately (`vhs_dr5/`, `vhs_dr5_ap6/`) since
+  the ap6 columns are outside VizieR's default column set. `vhs_subdir` /
+  `vhs_template` default to `None` and resolve on access, so
+  `dataclasses.replace(cfg, vhs_mag_set=...)` moves the staging with the
+  magnitude set. Vega→AB offsets are keyed by column name and registered for
+  **both** sets.
+- **Coverage cut** (v0.6.0): `min_7ds_band_fraction` counts only the 7DS bands
+  in the denominator, externals as a bonus. Use it with
+  `run_value_added(..., drop_empty_bands=True)` when tiles differ in band
+  coverage — an unobserved band still carries an all-NaN column and filter
+  detection works from column presence, so a plain `min_filter_fraction=0.80`
+  left 40 of 958 galaxies on a tile missing `g`/`r`/`i`.
+- **Split stages** (`run_value_added_split`, v0.6.0): photo-z and SED fit on
+  different photometry (aperture / VHS set / `use_*`). Both flux catalogs are
+  cut to the galaxies surviving both coverage cuts, because FAST++ reads the
+  `.zout` EAzY wrote and the merge `hstack`s positionally.
 - Filters: broad bands use `f_7DS_g/r/i` (not `f_SDSS_*`). `FILTER.RES.latest`
   and `default.translate` were updated by `update_7ds_filters.py`; keep the two
   files in sync (a prior desync was missing `f_7DS_g/r/i`).
@@ -261,6 +290,43 @@ phot7ds/
    `Query/Vizier_Query.py` and removed `VACConfig.vizier_query_path`. Added
    `astroquery` to the `vac` extra (imported lazily). Verified a live REGALADE
    download for T22956 (4071 sources).
+
+## 9c. Recent changes (2026-08-29, v0.6.0)
+
+Promoted the machinery that had accumulated in the RIS production driver
+(`RIS/script/RIS_vac.py`) into the package. The driver went from ~1030 to
+~470 lines and no longer monkey-patches `vac.fluxes` / `vac.crossmatch`
+module tables, nor imports private names (`_select_tile_row`).
+
+1. `VACConfig.vhs_mag_set` (+ `resolve_vhs_mag_set`, `VHS_STAGING`,
+   `vhs_staging`, `fluxes.VHS_MAG_COLUMNS`, `fluxes.external_columns`): the
+   VHS aperture pairing described in §7. Replaces a context manager in the
+   driver that rebound `fluxes._EXTERNAL_COLUMNS` per stage.
+2. `vizier.prefetch_references` + `time_limit` + `tile_query_box`: bounded
+   up-front staging, the `cos(dec)` query-box fix, and the `SIGALRM` cap.
+   Presets `vhs_ap6` (superset of `vhs`) and `catwise` added.
+3. `fluxes.drop_dead_bands` / `live_bands` +
+   `run_value_added(drop_empty_bands=True)`, and
+   `VACConfig.min_7ds_band_fraction` + `fluxes.required_filter_count`: the
+   dead-band trim and the 7DS-relative coverage cut. The driver's
+   "fraction offset by half a filter to land on the intended integer" hack is
+   gone — the requirement is now an integer count computed directly.
+4. `pipeline.run_value_added_split` is official API, along with
+   `select_tile_row`, `fluxes.write_flux_inputs` and
+   `build_flux_catalog(write=False)`. When the two stages want different VHS
+   sets, `_match_vhs_mag_set` prefers the ap6 staging (a superset) but yields
+   to whichever file is actually staged: matching an absent ap6 file would
+   drop the NIR bands from *both* stages.
+5. Fixed: Vega→AB offsets were registered only for the Petrosian column
+   names, so an ap6 run would have left the NIR points on the Vega scale
+   (J off by 0.94 mag).
+6. `VACConfig.reference_path(key, tile)` for per-tile reference paths by
+   preset key, with a generic `{catalog_dir}/{key}/{tile}_{key}.fits`
+   fallback.
+
+Verified end-to-end on T16088 (32558 rows → 1642 matched galaxies, 30
+filters, coverage cut ≥18): full EAzY + FAST++ run, and the split path with
+photo-z on `aper05c` 7DS-only vs. SED fit on `autoc` + VHS/GALEX/WISE.
 
 ## 10. Open / possible next steps
 

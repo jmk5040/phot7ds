@@ -17,12 +17,20 @@ from astropy.table import Table
 from ..crossmatch import matching
 from ..tile_geometry import trim_to_tile_polygon
 from .config import VACConfig
-from .vizier import ensure_external_catalog
+from .vizier import ensure_external_catalog, vhs_preset_key
 
 log = logging.getLogger(__name__)
 
-# VHS Vega -> AB offsets (mag).
-_VHS_VEGA_TO_AB = {"Ypmag": 0.63, "Jpmag": 0.94, "Hpmag": 1.38, "Kspmag": 1.90}
+# VHS Vega -> AB offsets (mag), keyed by column name and applied only to the
+# columns actually present. Both magnitude sets are listed so a single matched
+# table can serve stages that use different ones; without the ap6 entries the
+# NIR points would silently stay on the Vega scale (J off by 0.94 mag).
+VHS_VEGA_TO_AB = {
+    # Petrosian (total light).
+    "Ypmag": 0.63, "Jpmag": 0.94, "Hpmag": 1.38, "Kspmag": 1.90,
+    # 5.7" aperture, extended-source, no aperture correction.
+    "Yapc6": 0.63, "Japc6": 0.94, "Hapc6": 1.38, "Ksapc6": 1.90,
+}
 
 
 def build_galaxy_catalog(
@@ -93,7 +101,7 @@ def build_galaxy_catalog(
 def _match_vhs(mtbl: Table, cfg: VACConfig, tile: str, tile_info) -> Table:
     path = cfg.vhs_path(tile)
     if not os.path.exists(path):
-        ensure_external_catalog("vhs", tile, tile_info, path, cfg)
+        ensure_external_catalog(vhs_preset_key(cfg), tile, tile_info, path, cfg)
     if not os.path.exists(path):
         log.info("No VHS catalog for tile %s; skipping NIR bands.", tile)
         return mtbl
@@ -101,7 +109,7 @@ def _match_vhs(mtbl: Table, cfg: VACConfig, tile: str, tile_info) -> Table:
     if len(vhscat) == 0:
         log.info("VHS catalog for tile %s is empty; skipping.", tile)
         return mtbl
-    for col, off in _VHS_VEGA_TO_AB.items():
+    for col, off in VHS_VEGA_TO_AB.items():
         if col in vhscat.colnames:
             vhscat[col] = vhscat[col] + off
     return matching(
@@ -162,4 +170,4 @@ def _dedup_brightest(mtbl: Table, cfg: VACConfig) -> Table:
     return mtbl[np.array(keep_indices)]
 
 
-__all__ = ["build_galaxy_catalog"]
+__all__ = ["build_galaxy_catalog", "VHS_VEGA_TO_AB"]

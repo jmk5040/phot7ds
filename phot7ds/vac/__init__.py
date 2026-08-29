@@ -21,16 +21,32 @@ stage that needs them runs.
 """
 from __future__ import annotations
 
-from .config import VACConfig
+from .config import VACConfig, resolve_vhs_mag_set
 
 # Lightweight, always-importable pieces.
 from .crossmatch import build_galaxy_catalog
-from .fluxes import build_flux_catalog, detect_filters
+from .fluxes import (
+    build_flux_catalog,
+    detect_filters,
+    drop_dead_bands,
+    live_bands,
+    write_flux_inputs,
+)
 from .report import write_run_log
-from .vizier import ensure_external_catalog
+from .vizier import (
+    CATALOG_PRESETS,
+    CatalogPreset,
+    ensure_external_catalog,
+    prefetch_references,
+)
 
 # ``pipeline`` imports photoz/sedfit lazily, so it is safe to expose here.
-from .pipeline import VACResult, run_value_added
+from .pipeline import (
+    VACResult,
+    run_value_added,
+    run_value_added_split,
+    select_tile_row,
+)
 
 # Photo-z backend (binary). Importable without eazy-py installed.
 from .photoz_binary import run_eazy_binary
@@ -39,10 +55,19 @@ __all__ = [
     "VACConfig",
     "VACResult",
     "run_value_added",
+    "run_value_added_split",
+    "resolve_vhs_mag_set",
+    "select_tile_row",
     "build_galaxy_catalog",
     "build_flux_catalog",
     "detect_filters",
+    "drop_dead_bands",
+    "live_bands",
+    "write_flux_inputs",
+    "CatalogPreset",
+    "CATALOG_PRESETS",
     "ensure_external_catalog",
+    "prefetch_references",
     "write_run_log",
     "run_eazy_binary",
 ]

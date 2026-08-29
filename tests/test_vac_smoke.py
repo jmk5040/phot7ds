@@ -8,6 +8,8 @@ These avoid the heavy optional dependencies (``eazy``, ``sfdmap``,
 """
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 from astropy.table import Table
@@ -194,11 +196,282 @@ def test_external_enabled_respects_toggles() -> None:
 def test_vizier_preset_mapping() -> None:
     from phot7ds.vac.vizier import CATALOG_PRESETS
 
-    for key in ("regalade", "vhs", "galex"):
+    for key in ("regalade", "vhs", "vhs_ap6", "galex", "catwise"):
         assert key in CATALOG_PRESETS
         assert CATALOG_PRESETS[key].key == key
         assert CATALOG_PRESETS[key].vizier_id  # non-empty VizieR id
     assert CATALOG_PRESETS["regalade"].vizier_id == "J/A+A/706/A284/regalade"
+    assert CATALOG_PRESETS["catwise"].vizier_id == "II/365/catwise"
+
+    # The ap6 staging must be a superset of the plain VHS one, so a single
+    # matched table can serve both magnitude sets.
+    plain = set(CATALOG_PRESETS["vhs"].columns or ())
+    ap6 = set(CATALOG_PRESETS["vhs_ap6"].columns or ())
+    assert plain <= ap6
+    assert {"Japc6", "Hapc6", "Ksapc6"} <= ap6
+
+
+# --- VHS magnitude sets -------------------------------------------------
+def test_vhs_mag_set_selects_columns_and_staging() -> None:
+    from phot7ds.vac import VACConfig, resolve_vhs_mag_set
+    from phot7ds.vac.crossmatch import VHS_VEGA_TO_AB
+    from phot7ds.vac.fluxes import external_columns
+    from phot7ds.vac.vizier import vhs_preset_key
+
+    # A fixed 7DS aperture pairs with the VHS 5.7" aperture; total-light
+    # magnitudes pair with the Petrosian ones.
+    assert resolve_vhs_mag_set("aper05c") == "ap6"
+    assert resolve_vhs_mag_set("autoc") == "petro"
+    assert resolve_vhs_mag_set("auto") == "petro"
+
+    petro = VACConfig(lib_dir="/lib", catalog_dir="/cat", output_root="/out",
+                      photoz_engine="eazy-py")
+    assert external_columns(petro)["f_VHS_J"] == ("vhs_Jpmag", "vhs_e_Jpmag")
+    assert petro.vhs_staging[0] == "vhs_dr5"
+    assert vhs_preset_key(petro) == "vhs"
+
+    ap6 = VACConfig(lib_dir="/lib", catalog_dir="/cat", output_root="/out",
+                    vhs_mag_set="ap6", photoz_engine="eazy-py")
+    assert external_columns(ap6)["f_VHS_J"] == ("vhs_Japc6", "vhs_e_Jap6")
+    # ap6 columns are absent from VizieR's default set, so they are staged
+    # separately rather than overwriting the shared VHS files.
+    assert ap6.vhs_staging[0] == "vhs_dr5_ap6"
+    assert str(ap6.vhs_path("T1")).endswith("vhs_dr5_ap6/T1_vhs_dr5_ap6.fits")
+    assert vhs_preset_key(ap6) == "vhs_ap6"
+
+    # The staging has to follow the magnitude set through dataclasses.replace,
+    # or a split run looks for ap6 columns in the Petrosian files.
+    back = replace(ap6, vhs_mag_set="petro")
+    assert str(back.vhs_path("T1")).endswith("vhs_dr5/T1_vhs_dr5.fits")
+    assert external_columns(back)["f_VHS_J"] == ("vhs_Jpmag", "vhs_e_Jpmag")
+
+    # An explicit staging location is respected, and pins both sets to it.
+    custom = VACConfig(lib_dir="/lib", catalog_dir="/cat", output_root="/out",
+                       vhs_mag_set="ap6", vhs_subdir="mine",
+                       vhs_template="{tile}.fits", photoz_engine="eazy-py")
+    assert str(custom.vhs_path("T1")).endswith("mine/T1.fits")
+    assert str(replace(custom, vhs_mag_set="petro").vhs_path("T1")).endswith(
+        "mine/T1.fits")
+
+    # Both magnitude sets need Vega->AB offsets, or the NIR points silently
+    # stay on the Vega scale.
+    for mcol, _err in external_columns(ap6).values():
+        if mcol.startswith("vhs_"):
+            assert mcol[len("vhs_"):] in VHS_VEGA_TO_AB
+
+    with pytest.raises(ValueError):
+        VACConfig(lib_dir="/lib", catalog_dir="/cat", output_root="/out",
+                  vhs_mag_set="nope", photoz_engine="eazy-py")
+
+
+def test_split_match_prefers_staged_vhs(tmp_path) -> None:
+    from phot7ds.vac import VACConfig
+    from phot7ds.vac.pipeline import _match_vhs_mag_set
+
+    def cfg(mag_set):
+        return VACConfig(lib_dir="/lib", catalog_dir=str(tmp_path),
+                         output_root="/out", vhs_mag_set=mag_set,
+                         photoz_engine="eazy-py")
+
+    ap6, petro = cfg("ap6"), cfg("petro")
+
+    # Nothing staged: keep the preferred (superset) set so auto_download has
+    # something to fetch.
+    assert _match_vhs_mag_set(ap6, petro, "T1") == "ap6"
+
+    # Only the Petrosian file is staged. Matching the absent ap6 file would
+    # drop the NIR bands from both stages; matching petro keeps them for the
+    # stage that asked for Petrosian magnitudes.
+    petro_path = petro.vhs_path("T1")
+    petro_path.parent.mkdir(parents=True, exist_ok=True)
+    petro_path.write_text("placeholder")
+    assert _match_vhs_mag_set(ap6, petro, "T1") == "petro"
+
+    # Once ap6 is staged it wins again: it is a superset, so it serves both.
+    ap6_path = ap6.vhs_path("T1")
+    ap6_path.parent.mkdir(parents=True, exist_ok=True)
+    ap6_path.write_text("placeholder")
+    assert _match_vhs_mag_set(ap6, petro, "T1") == "ap6"
+
+    # When neither stage wants ap6, the shared staging is used as-is.
+    assert _match_vhs_mag_set(petro, petro, "T1") == "petro"
+
+
+def test_reference_path_falls_back_to_generic_layout() -> None:
+    from phot7ds.vac import VACConfig
+
+    cfg = VACConfig(lib_dir="/lib", catalog_dir="/cat", output_root="/out",
+                    photoz_engine="eazy-py")
+    assert cfg.reference_path("regalade", "T1") == cfg.regalade_path("T1")
+    assert cfg.reference_path("vhs", "T1") == cfg.vhs_path("T1")
+    assert cfg.reference_path("galex", "T1") == cfg.galex_path("T1")
+    assert str(cfg.reference_path("catwise", "T1")).endswith(
+        "catwise/T1_catwise.fits")
+
+
+# --- dead bands and the coverage cut -----------------------------------
+def test_drop_dead_bands_removes_all_nan_columns() -> None:
+    from phot7ds.vac import drop_dead_bands, live_bands
+
+    n = 100
+    cat = Table({
+        "aper05c_mag_m625": np.full(n, 18.0),
+        "aper05c_mag_err_m625": np.full(n, 0.05),
+        # never observed on this tile: column exists but is entirely NaN
+        "aper05c_mag_g": np.full(n, np.nan),
+        "aper05c_mag_err_g": np.full(n, np.nan),
+        # measured for a single source: below the live threshold
+        "aper05c_mag_i": np.concatenate([[19.0], np.full(n - 1, np.nan)]),
+        "aper05c_mag_err_i": np.concatenate([[0.1], np.full(n - 1, np.nan)]),
+        "autoc_mag_m625": np.full(n, 17.5),
+        "autoc_mag_err_m625": np.full(n, 0.04),
+    })
+
+    live, dead = live_bands(cat, "aper05c")
+    assert live == ["m625"]
+    assert sorted(dead) == ["g", "i"]
+
+    prepared, live_by_aperture = drop_dead_bands(cat, ("aper05c", "autoc"))
+    assert "aper05c_mag_g" not in prepared.colnames
+    assert "aper05c_mag_err_g" not in prepared.colnames
+    assert "aper05c_mag_i" not in prepared.colnames
+    assert "aper05c_mag_m625" in prepared.colnames
+    assert live_by_aperture == {"aper05c": ["m625"], "autoc": ["m625"]}
+    # The input is left untouched.
+    assert "aper05c_mag_g" in cat.colnames
+
+
+def test_required_filter_count_modes() -> None:
+    from phot7ds.vac import VACConfig
+    from phot7ds.vac.fluxes import required_filter_count
+
+    # 4 x 7DS + 2 external = 6 filters.
+    flux = Table({"#id": [1]})
+    for col in ("f_7DS_g", "f_7DS_r", "f_7DS_m625", "f_7DS_m675",
+                "f_VHS_J", "f_NUV"):
+        flux[col] = [1.0]
+
+    plain = VACConfig(lib_dir="/lib", catalog_dir="/cat", output_root="/out",
+                      min_filter_fraction=0.80, photoz_engine="eazy-py")
+    # int(6 * 0.8) == 4, counted over every filter.
+    assert required_filter_count(flux, plain) == (4, 6)
+
+    # Against the 7DS bands alone: round(0.8 * 4) == 3, externals are a bonus.
+    seven = VACConfig(lib_dir="/lib", catalog_dir="/cat", output_root="/out",
+                      min_7ds_band_fraction=0.80, photoz_engine="eazy-py")
+    assert required_filter_count(flux, seven) == (3, 6)
+
+    # Never demand more filters than exist, nor fewer than one.
+    greedy = VACConfig(lib_dir="/lib", catalog_dir="/cat", output_root="/out",
+                       min_7ds_band_fraction=5.0, photoz_engine="eazy-py")
+    assert required_filter_count(flux, greedy) == (6, 6)
+    tiny = VACConfig(lib_dir="/lib", catalog_dir="/cat", output_root="/out",
+                     min_7ds_band_fraction=0.0, photoz_engine="eazy-py")
+    assert required_filter_count(flux, tiny) == (1, 6)
+
+
+def test_validity_cut_keeps_sources_with_enough_bands() -> None:
+    from phot7ds.vac import VACConfig
+    from phot7ds.vac.fluxes import _apply_validity_cut
+
+    flux = Table({
+        "#id": [1, 2, 3],
+        "f_7DS_g": [1.0, 1.0, -99.0],
+        "e_7DS_g": [0.1, 0.1, -99.0],
+        "f_7DS_r": [1.0, 1.0, -99.0],
+        "e_7DS_r": [0.1, 0.1, -99.0],
+        "f_7DS_m625": [1.0, -99.0, -99.0],
+        "e_7DS_m625": [0.1, -99.0, -99.0],
+        "f_7DS_m675": [1.0, -99.0, 1.0],
+        "e_7DS_m675": [0.1, -99.0, 0.1],
+    })
+    cfg = VACConfig(lib_dir="/lib", catalog_dir="/cat", output_root="/out",
+                    min_filter_fraction=0.75, photoz_engine="eazy-py")
+    kept, mask = _apply_validity_cut(flux, cfg)
+    # int(4 * 0.75) == 3 measured filters required.
+    assert list(kept["#id"]) == [1]
+    assert list(mask) == [True, False, False]
+
+
+# --- tile query geometry ------------------------------------------------
+def test_tile_query_box_deprojects_ra_span() -> None:
+    from phot7ds.vac.vizier import tile_query_box
+
+    # A ~1.4 deg wide tile at dec = -83 spans a much larger raw RA range;
+    # querying VizieR with the raw span pulls in far too much sky.
+    dec = -83.0
+    half_width = 0.7 / np.cos(np.radians(dec))
+    tile = Table({
+        "ra1": [180.0 - half_width], "ra2": [180.0 + half_width],
+        "ra3": [180.0 + half_width], "ra4": [180.0 - half_width],
+        "dec1": [dec - 0.5], "dec2": [dec - 0.5],
+        "dec3": [dec + 0.5], "dec4": [dec + 0.5],
+    })
+    ra_c, dec_c, width, height = tile_query_box(tile)
+    assert ra_c == pytest.approx(180.0)
+    assert dec_c == pytest.approx(dec)
+    assert width == pytest.approx(1.4, abs=1e-6)
+    assert height == pytest.approx(1.0, abs=1e-6)
+    # The raw span is many times the angular width at this declination.
+    assert 2 * half_width > 5 * width
+
+    _, _, padded_w, padded_h = tile_query_box(tile, margin_deg=0.05)
+    assert padded_w == pytest.approx(width + 0.05)
+    assert padded_h == pytest.approx(height + 0.05)
+
+
+def test_time_limit_raises_and_restores_handler() -> None:
+    import signal
+    import time
+
+    from phot7ds.vac.vizier import time_limit
+
+    before = signal.getsignal(signal.SIGALRM)
+    with pytest.raises(TimeoutError):
+        with time_limit(1):
+            time.sleep(3)
+    assert signal.getsignal(signal.SIGALRM) is before
+
+    # A block that finishes in time cancels the alarm.
+    with time_limit(5):
+        pass
+    assert signal.getsignal(signal.SIGALRM) is before
+
+
+def test_prefetch_references_skips_staged_and_reports(tmp_path, monkeypatch) -> None:
+    from phot7ds.vac import VACConfig, prefetch_references
+    from phot7ds.vac import vizier as vac_vizier
+
+    tile_table = Table({
+        "tile": ["T1"],
+        "ra1": [179.5], "ra2": [180.5], "ra3": [180.5], "ra4": [179.5],
+        "dec1": [-0.5], "dec2": [-0.5], "dec3": [0.5], "dec4": [0.5],
+    })
+    cfg = VACConfig(lib_dir="/lib", catalog_dir=str(tmp_path), output_root="/out",
+                    auto_download=True, vizier_attempts=2,
+                    photoz_engine="eazy-py")
+
+    # GALEX is already staged; VHS is not and its download keeps failing.
+    galex = cfg.galex_path("T1")
+    galex.parent.mkdir(parents=True, exist_ok=True)
+    galex.write_text("placeholder")
+
+    attempts = {"n": 0}
+
+    def _boom(*args, **kwargs):
+        attempts["n"] += 1
+        raise RuntimeError("vizier is down")
+
+    monkeypatch.setattr(vac_vizier, "download_catalog_for_tile", _boom)
+    staged = prefetch_references(["T1", "T_absent"], tile_table, cfg,
+                                 keys=("vhs", "galex"))
+
+    assert staged["T1"]["galex"] is True
+    assert staged["T1"]["vhs"] is False
+    # A failed optional reference is retried, then reported and skipped
+    # rather than raising and taking the whole batch down.
+    assert attempts["n"] == cfg.vizier_attempts
+    assert staged["T_absent"] == {}
 
 
 def test_ensure_external_catalog_noop_when_present(tmp_path) -> None:

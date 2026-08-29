@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 from astropy.io import ascii as ascii_io
@@ -21,17 +23,40 @@ from .config import VACConfig
 log = logging.getLogger(__name__)
 
 # Resolver: EAzY filter name -> (reference column, error column or None).
-# ``None`` for the catalog (7DS/SDSS) bands, which are resolved from the
+# The catalog (7DS) bands are absent here: they are resolved from the
 # aperture magnitude columns instead.
-_EXTERNAL_COLUMNS: dict[str, tuple[str, str | None]] = {
+_BASE_EXTERNAL_COLUMNS: dict[str, tuple[str, str | None]] = {
     "f_W1": ("regalade_W1mag", None),
     "f_W2": ("regalade_W2mag", None),
-    "f_VHS_J": ("vhs_Jpmag", "vhs_e_Jpmag"),
-    "f_VHS_H": ("vhs_Hpmag", "vhs_e_Hpmag"),
-    "f_VHS_K": ("vhs_Kspmag", "vhs_e_Kspmag"),
     "f_FUV": ("galex_FUVmag", "galex_e_FUVmag"),
     "f_NUV": ("galex_NUVmag", "galex_e_NUVmag"),
 }
+
+# VHS columns per magnitude set (see VACConfig.vhs_mag_set). VizieR publishes
+# a single error per aperture ('e_Jap6'), shared by both ap6 flavours.
+VHS_MAG_COLUMNS: dict[str, dict[str, tuple[str, str]]] = {
+    "petro": {  # total light, pairs with auto / autoc
+        "f_VHS_J": ("vhs_Jpmag", "vhs_e_Jpmag"),
+        "f_VHS_H": ("vhs_Hpmag", "vhs_e_Hpmag"),
+        "f_VHS_K": ("vhs_Kspmag", "vhs_e_Kspmag"),
+    },
+    "ap6": {  # 5.7 arcsec aperture, pairs with aper05c
+        "f_VHS_J": ("vhs_Japc6", "vhs_e_Jap6"),
+        "f_VHS_H": ("vhs_Hapc6", "vhs_e_Hap6"),
+        "f_VHS_K": ("vhs_Ksapc6", "vhs_e_Ksap6"),
+    },
+}
+
+
+def external_columns(cfg: VACConfig) -> dict[str, tuple[str, str | None]]:
+    """External filter -> (magnitude column, error column) for this config.
+
+    The VHS entries follow ``cfg.vhs_mag_set``, which is what lets one
+    matched table feed stages that measure different apertures.
+    """
+    columns = dict(_BASE_EXTERNAL_COLUMNS)
+    columns.update(VHS_MAG_COLUMNS[cfg.vhs_mag_set])
+    return columns
 
 
 def _tile_center(tile_info) -> tuple[float, float]:
@@ -90,7 +115,7 @@ def detect_filters(magtbl: Table, cfg: VACConfig) -> list[str]:
             if fname in defined:
                 detected.append(fname)
 
-    for fname, (mcol, _err) in _EXTERNAL_COLUMNS.items():
+    for fname, (mcol, _err) in external_columns(cfg).items():
         if mcol in cols and fname in defined and _external_enabled(fname, cfg):
             detected.append(fname)
 
@@ -99,6 +124,64 @@ def detect_filters(magtbl: Table, cfg: VACConfig) -> list[str]:
     detected = [f for f in detected if f in lam]
     detected.sort(key=lambda f: lam[f])
     return detected
+
+
+def live_bands(
+    catalog: Table, aperture: str, *, min_fraction: float = 0.01
+) -> tuple[list[str], list[str]]:
+    """Split an aperture's magnitude bands into measured and empty ones.
+
+    Returns ``(live, dead)`` band tokens. A band counts as live when more than
+    ``min_fraction`` of its magnitudes are finite and physically sane. Tiles
+    that were never observed in a given band still carry the column, filled
+    with NaN, and :func:`detect_filters` works from column *presence* — so
+    without this the dead bands would be counted in the coverage denominator.
+    """
+    prefix = f"{aperture}_mag_"
+    live: list[str] = []
+    dead: list[str] = []
+    for col in catalog.colnames:
+        if not col.startswith(prefix) or "_mag_err_" in col:
+            continue
+        values = np.asarray(catalog[col], dtype=float)
+        good = np.isfinite(values) & (values > 0) & (values < 40)
+        target = live if good.mean() > min_fraction else dead
+        target.append(col[len(prefix):])
+    return live, dead
+
+
+def drop_dead_bands(
+    catalog: Table,
+    apertures: str | Sequence[str],
+    *,
+    min_fraction: float = 0.01,
+) -> tuple[Table, dict[str, list[str]]]:
+    """Return a copy of ``catalog`` without its all-empty magnitude bands.
+
+    Dropping them keeps the EAzY/FAST++ input catalogs honest and makes the
+    filter accounting behind the coverage cut exact. Pass every aperture a
+    split run will fit so one prepared catalog serves both stages. Returns
+    ``(catalog, {aperture: live_bands})``.
+    """
+    if isinstance(apertures, str):
+        apertures = (apertures,)
+    prepared = catalog.copy()
+    live_by_aperture: dict[str, list[str]] = {}
+    dropped: list[str] = []
+    for aperture in dict.fromkeys(apertures):
+        live, dead = live_bands(prepared, aperture, min_fraction=min_fraction)
+        live_by_aperture[aperture] = live
+        for band in dead:
+            for col in (f"{aperture}_mag_{band}", f"{aperture}_mag_err_{band}"):
+                if col in prepared.colnames:
+                    prepared.remove_column(col)
+                    dropped.append(col)
+    if dropped:
+        log.info("Dropped %d empty band column(s): %s",
+                 len(dropped), ", ".join(sorted(dropped)))
+    for aperture, live in live_by_aperture.items():
+        log.info("Live 7DS bands (%s): %d", aperture, len(live))
+    return prepared, live_by_aperture
 
 
 def _external_enabled(fname: str, cfg: VACConfig) -> bool:
@@ -162,11 +245,30 @@ def _extinction_by_filter(
     }
 
 
+def write_flux_inputs(
+    flux_tbl: Table,
+    id_table: Table,
+    out_dir: str | Path,
+    tile: str,
+    cfg: VACConfig,
+) -> tuple[Path, Path]:
+    """Write one stage's ``.cat`` / ``target_ids.fits`` into ``out_dir``."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cat_path = out_dir / f"{tile}_{cfg.detection_ref}_phot.cat"
+    id_path = out_dir / f"{tile}_{cfg.detection_ref}_target_ids.fits"
+    flux_tbl.write(cat_path, format="ascii", delimiter="\t", overwrite=True)
+    id_table.write(id_path, format="fits", overwrite=True)
+    return cat_path, id_path
+
+
 def build_flux_catalog(
     magtbl: Table,
     cfg: VACConfig,
     tile: str,
     tile_info,
+    *,
+    write: bool = True,
 ) -> tuple[Table, Table, dict]:
     """Build the EAzY/FAST++ flux catalog and the target-id table.
 
@@ -185,6 +287,10 @@ def build_flux_catalog(
         Tile identifier (used in the output file names).
     tile_info
         Single-row tile table (for the extinction sightline center).
+    write
+        Write the ``.cat`` / ``target_ids.fits`` into both the photo-z and
+        SED-fit directories. A split run passes ``False`` and calls
+        :func:`write_flux_inputs` per stage once the common row set is known.
 
     Returns
     -------
@@ -207,6 +313,7 @@ def build_flux_catalog(
 
     aperture = cfg.aperture
     error_margin = cfg.error_margin
+    ext_columns = external_columns(cfg)
 
     fluxtbl = Table()
     fluxtbl["#id"] = np.arange(1, len(magtbl) + 1)
@@ -221,8 +328,8 @@ def build_flux_catalog(
             errcol = magcol.replace("_mag_", "_mag_err_")
             fluxtbl[band] = mag_to_flux(magtbl[magcol] - ext)
             fluxtbl[ecol] = mag_to_flux_err(magtbl[magcol], magtbl[errcol] + error_margin)
-        elif band in _EXTERNAL_COLUMNS:
-            mcol, errc = _EXTERNAL_COLUMNS[band]
+        elif band in ext_columns:
+            mcol, errc = ext_columns[band]
             if mcol not in magtbl.colnames:
                 log.warning("Column %s for %s missing; skipping band.", mcol, band)
                 continue
@@ -239,19 +346,10 @@ def build_flux_catalog(
     log.info("Flux catalog: %d/%d sources pass the filter-coverage cut.",
              len(clean_tbl), len(fluxtbl))
 
-    # Write the EAzY and FAST++ input catalogs.
-    photoz_dir = cfg.photoz_dir(tile)
-    sedfit_dir = cfg.sedfit_dir(tile)
-    os.makedirs(photoz_dir, exist_ok=True)
-    os.makedirs(sedfit_dir, exist_ok=True)
-    cat_name = f"{tile}_{cfg.detection_ref}_phot.cat"
-    clean_tbl.write(photoz_dir / cat_name, format="ascii", delimiter="\t", overwrite=True)
-    clean_tbl.write(sedfit_dir / cat_name, format="ascii", delimiter="\t", overwrite=True)
-
     id_table = _build_id_table(magtbl, mask, cfg)
-    id_name = f"{tile}_{cfg.detection_ref}_target_ids.fits"
-    id_table.write(photoz_dir / id_name, format="fits", overwrite=True)
-    id_table.write(sedfit_dir / id_name, format="fits", overwrite=True)
+    if write:
+        for out_dir in (cfg.photoz_dir(tile), cfg.sedfit_dir(tile)):
+            write_flux_inputs(clean_tbl, id_table, out_dir, tile, cfg)
 
     flux_info = {
         "filters": filters,
@@ -261,23 +359,46 @@ def build_flux_catalog(
         "n_input": len(magtbl),
         "n_pass": len(clean_tbl),
         "min_filter_fraction": cfg.min_filter_fraction,
+        "min_7ds_band_fraction": cfg.min_7ds_band_fraction,
+        "n_filters_required": required_filter_count(fluxtbl, cfg)[0],
         "aperture": cfg.aperture,
+        "vhs_mag_set": cfg.vhs_mag_set,
         "error_margin": cfg.error_margin,
     }
     return clean_tbl, id_table, flux_info
 
 
-def _apply_validity_cut(fluxtbl: Table, cfg: VACConfig) -> tuple[Table, np.ndarray]:
-    """Keep sources with at least ``min_filter_fraction`` measured filters."""
-    meas_cols = [c for c in fluxtbl.colnames if c.startswith(("f_", "e_"))]
-    n_filters = len(meas_cols) // 2
-    least_n = int(n_filters * cfg.min_filter_fraction)
-    valcut = len(meas_cols) - least_n * 2  # max allowed (-99) sentinels
+def required_filter_count(fluxtbl: Table, cfg: VACConfig) -> tuple[int, int]:
+    """How many measured filters a source needs; returns ``(required, total)``.
 
-    mask = np.ones(len(fluxtbl), dtype=bool)
-    for i, row in enumerate(fluxtbl):
-        n_missing = sum(row[c] == -99 for c in meas_cols)
-        mask[i] = n_missing <= valcut
+    With ``min_7ds_band_fraction`` set, the requirement is a fraction of the
+    **7DS** bands present in this catalog, and the external surveys count as a
+    bonus rather than sitting in the denominator. That matters when band
+    coverage varies between tiles: a tile without g/r/i, or with only sparse
+    GALEX/VHS matches, would otherwise be held to a threshold its data can
+    never reach. Otherwise the plain fraction of all filters is used.
+    """
+    flux_cols = [c for c in fluxtbl.colnames if c.startswith("f_")]
+    n_total = len(flux_cols)
+    if cfg.min_7ds_band_fraction is None:
+        return int(n_total * cfg.min_filter_fraction), n_total
+    n_7ds = sum(1 for c in flux_cols if c.startswith("f_7DS_"))
+    required = int(round(cfg.min_7ds_band_fraction * n_7ds))
+    return max(1, min(required, n_total)), n_total
+
+
+def _apply_validity_cut(fluxtbl: Table, cfg: VACConfig) -> tuple[Table, np.ndarray]:
+    """Keep sources with enough measured filters (see ``required_filter_count``)."""
+    flux_cols = [c for c in fluxtbl.colnames if c.startswith("f_")]
+    required, n_total = required_filter_count(fluxtbl, cfg)
+
+    # -99 is the EAzY "not observed" sentinel written by mag_to_flux.
+    measured = np.zeros(len(fluxtbl), dtype=int)
+    for col in flux_cols:
+        measured += (np.asarray(fluxtbl[col], dtype=float) != -99).astype(int)
+    log.info("Coverage cut: >=%d of %d filters measured required.",
+             required, n_total)
+    mask = measured >= required
     return fluxtbl[mask], mask
 
 
@@ -300,4 +421,13 @@ def _build_id_table(magtbl: Table, mask: np.ndarray, cfg: VACConfig) -> Table:
     return idtbl
 
 
-__all__ = ["build_flux_catalog", "detect_filters"]
+__all__ = [
+    "build_flux_catalog",
+    "detect_filters",
+    "external_columns",
+    "VHS_MAG_COLUMNS",
+    "live_bands",
+    "drop_dead_bands",
+    "required_filter_count",
+    "write_flux_inputs",
+]

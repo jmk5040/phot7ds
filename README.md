@@ -49,15 +49,16 @@ phot7ds/          # repository root (this package)
     │   └── sevends.py                  # 7DS native white detection image (SWarp)
     └── vac/                            # value-added catalog subpackage (optional extra)
         ├── config.py                   # VACConfig (dataclass)
-        ├── vizier.py                   # on-demand external-catalog download
+        ├── vizier.py                   # VizieR download + batch prefetch
         ├── crossmatch.py               # REGALADE/VHS/GALEX matching + dedup
-        ├── fluxes.py                   # auto-detect filters, extinction-corrected fluxes
+        ├── fluxes.py                   # auto-detect filters, extinction-corrected fluxes,
+        │                               #   dead-band trim, coverage cut
         ├── photoz.py                   # eazy-py photo-z (m625 prior, z_m2/z_a)
         ├── photoz_binary.py            # compiled-EAzY photo-z (default engine)
         ├── sedfit.py                   # FAST++ SED fitting
         ├── catalog.py                  # merge photo-z + SED fits
         ├── report.py                   # per-run log file
-        ├── pipeline.py                 # run_value_added()  ← VAC entry
+        ├── pipeline.py                 # run_value_added[_split]()  ← VAC entry
         └── data/
             └── prior_m6250_desi.dat    # packaged m625 prior (SDSS + DESI BGS)
 ```
@@ -578,8 +579,9 @@ install prefix differs from the default `<fastpp_bin>/../../share`),
 
 1. **Cross-match** (`crossmatch.py`) — match the catalog to REGALADE
    (required; WISE `W1`/`W2` come bundled in its columns), then optionally
-   VHS (NIR, Vega→AB corrected) and GALEX (UV). Duplicate REGALADE
-   associations collapse to the brightest 7DS match.
+   VHS (NIR, Vega→AB corrected, Petrosian or 5.7″ aperture per
+   `vhs_mag_set`) and GALEX (UV). Duplicate REGALADE associations collapse to
+   the brightest 7DS match.
 2. **Flux assembly** (`fluxes.py`) — build the EAzY/FAST++ `.cat`
    (AB zeropoint 25) with Galactic-extinction correction (SFD + Fitzpatrick99
    at the tile center).
@@ -614,16 +616,98 @@ every `{aperture}_mag_<band>` column with a matching `f_7DS_<band>` entry in
 are present **and** the corresponding `use_wise` / `use_vhs` / `use_galex`
 toggle is on. The legacy `use_medium` / `use_broad` toggles are ignored.
 
+### VHS magnitude set (`vhs_mag_set`)
+
+A VHS band has to measure the same kind of light as the 7DS band next to it.
+Pairing a fixed 7DS aperture with total-light VHS magnitudes tilts the
+optical-to-NIR slope by aperture alone, and the photo-z absorbs the difference
+as redshift. `VACConfig.vhs_mag_set` picks which VHS columns are joined on:
+
+| value     | VHS columns                    | pairs with       |
+| --------- | ------------------------------ | ---------------- |
+| `"petro"` | `Jpmag`/`Hpmag`/`Kspmag`       | `auto`, `autoc`  |
+| `"ap6"`   | `Japc6`/`Hapc6`/`Ksapc6` (5.7″) | `aper05c`        |
+
+`resolve_vhs_mag_set(aperture)` returns the matching set, and the Vega→AB
+offsets are applied to whichever columns are present. Because the `ap6`
+columns are outside VizieR's default VHS column set, the two sets are staged
+in **separate** directories (`vhs_dr5/` and `vhs_dr5_ap6/`, see
+`config.VHS_STAGING`); set `vhs_subdir`/`vhs_template` to pin your own.
+
+GALEX and WISE have no fixed-aperture equivalent and stay total in either
+setup, so they remain the limiting term for an `aper05c` fit.
+
+### Filter-coverage cut
+
+By default a source must have `min_filter_fraction` (0.80) of **all** filters
+measured. When tiles differ in band coverage that threshold can exceed what
+the data can ever reach — a tile with no `g`/`r`/`i` coadds, or with only
+sparse GALEX/VHS matches, still counts those filters in the denominator. Set
+`min_7ds_band_fraction` instead to express the requirement against the 7DS
+bands alone and count the external surveys as a bonus.
+
+Pair it with `run_value_added(..., drop_empty_bands=True)`, which removes
+magnitude columns that are entirely empty before the filters are detected
+(`fluxes.drop_dead_bands` / `live_bands`): an unobserved band still has its
+column, filled with NaN, and detection works from column presence.
+
 ### On-demand external catalogs (VizieR)
 
 With `auto_download=True`, a per-tile reference catalog that is **absent** at
 its expected path is fetched by the in-package VizieR querier
 (`phot7ds.vac.vizier`, which needs `astroquery` from the `vac` extra) before
 matching: the catalog is queried inside the tile bounding box and trimmed to
-the tile polygon. Supported keys: `regalade`, `vhs`, `galex` (see
-`vac.vizier.CATALOG_PRESETS`). Download failures are non-fatal for the
-optional catalogs (the run proceeds and skips those bands); a missing
+the tile polygon. Supported keys: `regalade`, `vhs`, `vhs_ap6`, `galex`,
+`catwise` (see `vac.vizier.CATALOG_PRESETS`). Download failures are non-fatal
+for the optional catalogs (the run proceeds and skips those bands); a missing
 **REGALADE** catalog still raises.
+
+The query box is the tile's *angular* extent, i.e. the RA span deprojected by
+`cos(dec)`. This matters near the poles: a 1.4°-wide tile at dec = −83° spans
+~12° in raw RA, and querying that pulls in roughly an order of magnitude too
+much sky — enough to stall a dense catalog like VHS DR5.
+
+Each query is capped by `vizier_timeout` (180 s) and retried `vizier_attempts`
+(2) times. The cap is a hard `SIGALRM` wall clock, not just astroquery's own
+`timeout`, which is not reliably honoured and can stall on a half-closed
+connection.
+
+For a batch, stage the references **up front** so a flaky query cannot stall a
+long run part-way through, then turn `auto_download` off so the fitting stages
+never reach for the network:
+
+```python
+from phot7ds.vac import prefetch_references
+
+staged = prefetch_references(tiles, tile_table, config,
+                             keys=("vhs", "galex", "catwise"))
+# {tile: {key: staged?}} - an unfetchable reference just drops those bands
+```
+
+### Split photo-z and SED-fit inputs
+
+`run_value_added_split` fits the two stages on **different** photometry: EAzY
+reads one flux catalog, FAST++ another. Useful when the best photo-z
+photometry is not the best SED-fit photometry — e.g. a photo-z from 7DS fixed
+apertures alone, with the SED fit on total magnitudes plus every external
+survey:
+
+```python
+from phot7ds.vac import run_value_added_split
+
+result = run_value_added_split(
+    catalog_path=..., tile=..., tile_table=...,
+    config_photoz=replace(config, aperture="aper05c", vhs_mag_set="ap6",
+                          use_vhs=False, use_galex=False, use_wise=False),
+    config_sedfit=replace(config, aperture="autoc", vhs_mag_set="petro"),
+)
+```
+
+The two configs may differ in `aperture`, `vhs_mag_set` and the `use_*`
+toggles; everything else comes from `config_sedfit` for the merged output.
+Since everything downstream is aligned by row order — FAST++ reads the `.zout`
+EAzY wrote, and the merge `hstack`s positionally — both catalogs are cut to
+the galaxies surviving **both** coverage cuts before either binary runs.
 
 ### Magnitude prior and the redshift column
 
