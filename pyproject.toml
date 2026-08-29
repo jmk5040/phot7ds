@@ -40,5 +40,8 @@ Repository = "https://github.com/jmk5040/phot7ds"
 where = ["."]
 include = ["phot7ds*"]
 
+[tool.setuptools.package-data]
+"phot7ds.vac" = ["data/*.dat"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

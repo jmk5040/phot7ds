@@ -11,7 +11,7 @@ Read this first when starting a new session. Version at time of writing:
 `phot7ds` is a reusable Python package (Python API only) for processing 7DS
 survey data into zero-point-calibrated photometric catalogs and value-added
 catalogs. It refactors older one-off scripts into a modular package hosted on
-GitHub. The workspace root is `/data/data1/7DS/RIS/script`; the package lives
+GitHub. The workspace root is `/lyman/data1/7DS/RIS/script`; the package lives
 in the sibling `Phot7DS/` dir (`Phot7DS/phot7ds/`).
 
 ## 2. Environment & how to run
@@ -19,17 +19,21 @@ in the sibling `Phot7DS/` dir (`Phot7DS/phot7ds/`).
 - Conda env: **`7dt`** → interpreter `/home/jmkastro/miniconda3/envs/7dt/bin/python`
   (numpy 2.4.2). Always run scripts with this interpreter.
 - External binaries: **`SWarp`** at `/usr/bin/SWarp`; **FAST++** at
-  `/home/jmkastro/fastpp/bin/fast++`; SourceExtractor++ (`sourcextractor++`).
+  `/home/jmkastro/fastpp/bin/fast++`; **EAzY** at
+  `/lyman/data1/7DS/RIS/config/eazy/src/eazy`; SourceExtractor++
+  (`sourcextractor++`). Since v0.5.0 `VACConfig` no longer hard-codes the
+  FAST++/EAzY paths — export `PHOT7DS_FASTPP_BIN` / `PHOT7DS_EAZY_BIN` (or pass
+  `fastpp_bin=` / `eazy_bin=`) on this machine.
 - Set `MPLCONFIGDIR=/tmp/mpl` to avoid matplotlib cache warnings.
-- Import without install: scripts insert `/data/data1/7DS/RIS/script/Phot7DS`
+- Import without install: scripts insert `/lyman/data1/7DS/RIS/script/Phot7DS`
   onto `sys.path` (see `phot7ds_IMS.py`). The basedpyright "could not be
   resolved" warning for `phot7ds` in such scripts is a false positive.
 
 ### Sandbox / filesystem gotchas (IMPORTANT)
 - The agent shell runs sandboxed: **writes are only allowed inside the
-  workspace** (`/data/data1/7DS/RIS/script`). Everything else (e.g.
-  `/data/data1/7DS/IMS/DELVE`, `/data/data2/RIS/data`, `/data/data1/7DS/RIS/config`,
-  `/data/data1/7DS/RIS/catalog`) is **read-only** unless you pass
+  workspace** (`/lyman/data1/7DS/RIS/script`). Everything else (e.g.
+  `/lyman/data1/7DS/IMS/DELVE`, `/lyman/data2/RIS/data`, `/lyman/data1/7DS/RIS/config`,
+  `/lyman/data1/7DS/RIS/catalog`) is **read-only** unless you pass
   `required_permissions: ["all"]`.
 - Network (NOIRLab SIA, Vizier, etc.) needs `["all"]` (or `full_network`).
 - Those data dirs are often **root-owned**; the user runs as root but the
@@ -39,15 +43,15 @@ in the sibling `Phot7DS/` dir (`Phot7DS/phot7ds/`).
 
 | Purpose | Path |
 |---|---|
-| Config / LIB tree (EAzY, FILTER.RES, priors, SFD, swarp cfg) | `/data/data1/7DS/RIS/config/` and `.../config/LIB/` |
-| SWarp config | `/data/data1/7DS/RIS/config/7ds.swarp` |
-| SE++ config | `/data/data1/7DS/RIS/config/7ds_sepp.config` |
-| Tile table | `/data/data1/7DS/RIS/config/7DT_tiles.fits` (also `.ascii`) |
-| Band coverage table | `/data/data1/7DS/RIS/config/coadd_band_coverage.csv` |
-| Gaia XP reference CSVs | `/data/data1/7DS/RIS/catalog/gaiaxp/` |
-| Per-tile science coadds (+ `_weight.fits`) | `/data/data2/RIS/data/{tile}/*_coadd.fits` |
-| Output catalogs | `/data/data1/7DS/RIS/catalog/7ds/{tile}/` |
-| IMS DELVE detection images | `/data/data1/7DS/IMS/DELVE/{tile}_DELVE_DR3_{IMAGE,MASK}_det.fits` |
+| Config / LIB tree (EAzY, FILTER.RES, priors, SFD, swarp cfg) | `/lyman/data1/7DS/RIS/config/` and `.../config/LIB/` |
+| SWarp config | `/lyman/data1/7DS/RIS/config/7ds.swarp` |
+| SE++ config | `/lyman/data1/7DS/RIS/config/7ds_sepp.config` |
+| Tile table | `/lyman/data1/7DS/RIS/config/7DT_tiles.fits` (also `.ascii`) |
+| Band coverage table | `/lyman/data1/7DS/RIS/config/coadd_band_coverage.csv` |
+| Gaia XP reference CSVs | `/lyman/data1/7DS/RIS/catalog/gaiaxp/` |
+| Per-tile science coadds (+ `_weight.fits`) | `/lyman/data2/RIS/lyman/{tile}/*_coadd.fits` |
+| Output catalogs | `/lyman/data1/7DS/RIS/catalog/7ds/{tile}/` |
+| IMS DELVE detection images | `/lyman/data1/7DS/IMS/DELVE/{tile}_DELVE_DR3_{IMAGE,MASK}_det.fits` |
 
 ## 4. Package layout
 
@@ -142,7 +146,7 @@ phot7ds/
 
 ### IMS work (done 2026-06-16) — `IMS_detect.py`
 - 7 IMS tiles (`T02666 T02665 T02524 T02523 T02386 T02385 T02252`),
-  output `/data/data1/7DS/IMS/DELVE/`. Filled grid-induced + brick-boundary gaps
+  output `/lyman/data1/7DS/IMS/DELVE/`. Filled grid-induced + brick-boundary gaps
   to **0.0000** on all tiles. T02386's MASK had been generated as science data
   (pre-existing bug) → regenerated from scratch as a proper mask. `IMS_detect.py`
   gap-fills existing images (cheap) or `FULL_REGEN=True` rebuilds with the auto grid.
@@ -160,8 +164,10 @@ phot7ds/
   (`vac/report.py`).
 - **Photo-z engine (`VACConfig.photoz_engine`, added 2026-06-30):** default
   `"binary"` → `vac/photoz_binary.py:run_eazy_binary()` shells out to the
-  compiled EAzY at `VACConfig.eazy_bin`
-  (`/data/data1/7DS/RIS/config/eazy/src/eazy`); ~2 min for ~800 sources. The
+  compiled EAzY at `VACConfig.eazy_bin` (on this machine
+  `/lyman/data1/7DS/RIS/config/eazy/src/eazy`, now supplied via
+  `$PHOT7DS_EAZY_BIN` rather than a hard-coded default); ~2 min for ~800
+  sources. The
   binary's native `.zout` already has `z_m2`/`z_a` + `l68/u68/l95/u95/l99/u99`
   for FAST++, so it is copied verbatim into the SED-fit dir.
   `"eazy-py"` → `vac/photoz.py:run_eazy()` (pure Python) is kept but is
@@ -179,9 +185,12 @@ phot7ds/
 - Filters: broad bands use `f_7DS_g/r/i` (not `f_SDSS_*`). `FILTER.RES.latest`
   and `default.translate` were updated by `update_7ds_filters.py`; keep the two
   files in sync (a prior desync was missing `f_7DS_g/r/i`).
-- Prior: default `prior_m6250_extend.dat` (band m625). If prior applies →
-  redshift column `z_m2`, else `z_a`. Warn (don't fail) if `aper05c_mag_m625`
-  missing.
+- Prior: since v0.5.0 the default is the **packaged**
+  `phot7ds/vac/data/prior_m6250_desi.dat` (band m625) — the joint SDSS DR16 +
+  DESI DR1 BGS fit built by `IMS/script/ris_build_m625_prior_desi.py`. It
+  replaces `prior_m6250_extend.dat` (EL-COSMOS), which is mis-calibrated at the
+  bright end. `prior_file=` still overrides. If a prior applies → redshift
+  column `z_m2`, else `z_a`. Warn (don't fail) if `aper05c_mag_m625` missing.
 - **eazy-py multiprocessing deadlock:** `VACConfig.eazy_n_proc = -1` (default)
   forces serial `TemplateGrid` build and serial `fit_catalog` to avoid a fork
   timeout. Don't set it positive unless you know it's safe.
@@ -194,7 +203,8 @@ phot7ds/
   `:60.00`).
 - FITS keyword cards are ≤8 chars; hyphenated keys like `DATE-OBS`, `DATE-000`
   are valid and survive astropy `Table.write(format="fits")` with comments.
-- No `pytest` in the env; use inline runners. Smoke tests in `tests/`.
+- `pytest` is installed in the `7dt` env: run the smoke tests in `tests/` with
+  `MPLCONFIGDIR=/tmp/mpl python -m pytest tests/ -q`.
 - `build_coverage_mask` returns `(None, None)` (and logs) when science image
   shapes don't match the detection image, instead of raising.
 - Diagnostic figures off: `save_residual_plots=False` (run_photometry) /

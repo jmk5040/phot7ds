@@ -119,15 +119,65 @@ def test_vac_import_does_not_require_extras() -> None:
 # --- new VAC behavior ---------------------------------------------------
 def test_vacconfig_prior_defaults() -> None:
     from phot7ds.vac import VACConfig
+    from phot7ds.vac.config import PACKAGED_PRIOR
 
     cfg = VACConfig(lib_dir="/lib", catalog_dir="/cat", output_root="/out")
     assert cfg.prior_band == "m625"
-    assert str(cfg.prior_path) == "/lib/templates/prior_m6250_extend.dat"
+    # The default prior ships with the package, so it does not depend on
+    # which prior happens to sit in the user's LIB tree.
+    assert cfg.prior_path == PACKAGED_PRIOR
     assert cfg.auto_download is False
 
     cfg2 = VACConfig(lib_dir="/lib", catalog_dir="/cat", output_root="/out",
                      prior_band="r", prior_file="/lib/templates/prior_R_extend.dat")
     assert str(cfg2.prior_path).endswith("prior_R_extend.dat")
+
+
+def test_packaged_prior_is_installed_and_readable() -> None:
+    import numpy as np
+
+    from phot7ds.vac.config import PACKAGED_PRIOR
+
+    assert PACKAGED_PRIOR.is_file(), f"packaged prior missing: {PACKAGED_PRIOR}"
+    arr = np.loadtxt(PACKAGED_PRIOR)
+    # z column + one p(z|m) column per magnitude bin in the header.
+    kbins = PACKAGED_PRIOR.read_text().splitlines()[0].split()[2:]
+    assert arr.shape[1] == len(kbins) + 1
+    assert np.all(arr[:, 1:] >= 0)
+
+
+def test_vacconfig_binaries_are_discovered_not_hardcoded(monkeypatch) -> None:
+    """No machine-specific default paths: env var, then $PATH, then None."""
+    from phot7ds.vac import VACConfig
+
+    monkeypatch.setenv("PHOT7DS_FASTPP_BIN", "/somewhere/fast++")
+    monkeypatch.setenv("PHOT7DS_EAZY_BIN", "/somewhere/eazy")
+    cfg = VACConfig(lib_dir="/lib", catalog_dir="/cat", output_root="/out",
+                    photoz_engine="eazy-py")
+    assert str(cfg.fastpp_bin) == "/somewhere/fast++"
+    assert str(cfg.eazy_bin) == "/somewhere/eazy"
+
+    monkeypatch.delenv("PHOT7DS_FASTPP_BIN")
+    monkeypatch.delenv("PHOT7DS_EAZY_BIN")
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    cfg2 = VACConfig(lib_dir="/lib", catalog_dir="/cat", output_root="/out",
+                     photoz_engine="eazy-py")
+    assert cfg2.fastpp_bin is None
+    assert cfg2.eazy_bin is None
+    assert cfg2.fastpp_bin_ok() is False
+    assert cfg2.eazy_bin_ok() is False
+    # An unset binary is reported as unconfigured rather than crashing on a
+    # None path while deriving fastpp_share.
+    assert cfg2.fastpp_share is None
+    problems = cfg2.check_requirements(do_photoz=False, do_sedfit=True,
+                                       deep=False)
+    assert any("FAST++ binary" in p and "not configured" in p for p in problems)
+
+    # An explicit value always wins over the environment.
+    monkeypatch.setenv("PHOT7DS_FASTPP_BIN", "/from/env")
+    cfg3 = VACConfig(lib_dir="/lib", catalog_dir="/cat", output_root="/out",
+                     fastpp_bin="/explicit/fast++", photoz_engine="eazy-py")
+    assert str(cfg3.fastpp_bin) == "/explicit/fast++"
 
 
 def test_external_enabled_respects_toggles() -> None:

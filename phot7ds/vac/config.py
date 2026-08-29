@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,6 +21,38 @@ log = logging.getLogger(__name__)
 # Default 7DS medium-band set (m400..m875, 25 nm steps).
 DEFAULT_MEDIUM_BANDS: tuple[str, ...] = tuple(f"m{w}" for w in range(400, 900, 25))
 DEFAULT_BROAD_BANDS: tuple[str, ...] = ("g", "r", "i")
+
+# Magnitude prior shipped with the package: p(z | m625) of the Benitez (2000)
+# form, fitted jointly to SDSS DR16 (bright anchor, complete to m625 < 17.55)
+# and DESI DR1 BGS_BRIGHT (flux-limited, extending the empirical anchor to
+# m625 < 19.25). It supersedes the EL-COSMOS-derived prior_m6250_extend.dat
+# that earlier releases expected inside the LIB tree; that one is
+# mis-calibrated at the bright end and biases low-z galaxies high.
+PACKAGED_PRIOR = Path(__file__).resolve().parent / "data" / "prior_m6250_desi.dat"
+
+# Compiled binaries are discovered rather than hard-coded: an explicit
+# VACConfig value wins, then the environment variable, then $PATH.
+FASTPP_BIN_ENV = "PHOT7DS_FASTPP_BIN"
+EAZY_BIN_ENV = "PHOT7DS_EAZY_BIN"
+FASTPP_BIN_NAMES = ("fast++",)
+EAZY_BIN_NAMES = ("eazy",)
+
+
+def _discover_binary(env_var: str, names: tuple[str, ...]) -> str | None:
+    """Locate an external executable from the environment or ``$PATH``.
+
+    Returns ``None`` when nothing is found, which lets
+    :meth:`VACConfig.preflight` report "not configured" instead of a stale
+    path inherited from whoever happened to write the default.
+    """
+    from_env = os.environ.get(env_var)
+    if from_env:
+        return from_env
+    for name in names:
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
 
 
 @dataclass
@@ -39,8 +72,12 @@ class VACConfig:
         each in a named subdirectory.
     output_root
         Root for per-tile VAC products (photo-z, SED, value-added catalog).
-    fastpp_bin
-        Path to the compiled ``fast++`` executable.
+    fastpp_bin, eazy_bin
+        Paths to the compiled ``fast++`` / ``eazy`` executables. Leave at
+        ``None`` to resolve them from ``$PHOT7DS_FASTPP_BIN`` /
+        ``$PHOT7DS_EAZY_BIN`` and then ``$PATH``; when neither turns one up
+        the corresponding stage fails in :meth:`preflight` rather than
+        mid-run.
     detection_ref
         Detection-image tag used in file names (e.g. ``DELVE``, ``7DS``).
     aperture
@@ -57,8 +94,9 @@ class VACConfig:
         in-package VizieR querier (:mod:`phot7ds.vac.vizier`, needs
         ``astroquery``) before matching.
     prior_band, prior_file
-        Magnitude-prior band (default ``m625``) and prior table (default
-        ``templates/prior_m6250_extend.dat``).
+        Magnitude-prior band (default ``m625``) and prior table. ``prior_file``
+        defaults to the packaged SDSS+DESI m625 prior (:data:`PACKAGED_PRIOR`),
+        so a run does not depend on which prior happens to sit in the LIB tree.
     match_radius_arcsec
         Cross-match radius for all reference catalogs.
     error_margin
@@ -77,12 +115,14 @@ class VACConfig:
     lib_dir: str | Path
     catalog_dir: str | Path
     output_root: str | Path
-    fastpp_bin: str | Path = "/home/jmkastro/fastpp/bin/fast++"
+    # Compiled binaries; None -> resolved from the environment / $PATH in
+    # __post_init__ (see _discover_binary).
+    fastpp_bin: str | Path | None = None
     fastpp_share_dir: str | Path | None = None
     fastpp_library_dir: str | Path | None = None
     sfd_dir: str | Path | None = None
     # Compiled EAzY binary (used when photoz_engine == "binary").
-    eazy_bin: str | Path = "/data/data1/7DS/RIS/config/eazy/src/eazy"
+    eazy_bin: str | Path | None = None
 
     # Naming / catalog columns
     detection_ref: str = "DELVE"
@@ -129,7 +169,7 @@ class VACConfig:
     # Magnitude prior (eazy). Default is the 7DS m625 prior; when the prior
     # band's flux is absent the run proceeds without a prior (see photoz.py).
     prior_band: str = "m625"
-    prior_file: str | Path | None = None  # default: templates/prior_m6250_extend.dat
+    prior_file: str | Path | None = None  # default: the packaged m625 prior
 
     # Matching / flux assembly
     match_radius_arcsec: float = 2.0
@@ -181,15 +221,22 @@ class VACConfig:
     fastpp_params: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if self.fastpp_bin is None:
+            self.fastpp_bin = _discover_binary(FASTPP_BIN_ENV, FASTPP_BIN_NAMES)
+        if self.eazy_bin is None:
+            self.eazy_bin = _discover_binary(EAZY_BIN_ENV, EAZY_BIN_NAMES)
+
         # Early, non-fatal heads-up: when the (default) binary photo-z engine
         # is selected but no executable is found at ``eazy_bin``, warn now so
         # the user can fix the path before a long run reaches the photo-z
-        # stage. ``validate(require_eazy_bin=True)`` still hard-fails later.
+        # stage. ``preflight`` still hard-fails later.
         if self.photoz_engine == "binary" and not self.eazy_bin_ok():
+            where = (f"eazy_bin={self.eazy_bin!s}" if self.eazy_bin
+                     else f"${EAZY_BIN_ENV} or $PATH")
             warnings.warn(
                 f"VACConfig.photoz_engine='binary' but no EAzY executable was "
-                f"found at eazy_bin={self.eazy_bin!s}. Build/point to the "
-                f"compiled 'eazy' binary, or set photoz_engine='eazy-py'.",
+                f"found ({where}). Build it and set VACConfig.eazy_bin (or "
+                f"${EAZY_BIN_ENV}), or set photoz_engine='eazy-py'.",
                 stacklevel=2,
             )
 
@@ -205,14 +252,17 @@ class VACConfig:
         return Path(self.sfd_dir) if self.sfd_dir else self.lib_path / "sfddata"
 
     @property
-    def fastpp_share(self) -> Path:
+    def fastpp_share(self) -> Path | None:
         """FAST++ ``share`` tree (template error fn + SPS libraries).
 
         Defaults to ``<fastpp_bin>/../../share`` (the standard install
-        layout) when not set explicitly.
+        layout) when not set explicitly, and is ``None`` when it cannot be
+        derived because no ``fastpp_bin`` was found.
         """
         if self.fastpp_share_dir:
             return Path(self.fastpp_share_dir)
+        if not self.fastpp_bin:
+            return None
         return Path(self.fastpp_bin).resolve().parent.parent / "share"
 
     @property
@@ -241,10 +291,10 @@ class VACConfig:
 
     @property
     def prior_path(self) -> Path:
-        """eazy magnitude-prior file (default: 7DS m625 prior)."""
+        """eazy magnitude-prior file (default: the packaged 7DS m625 prior)."""
         if self.prior_file:
             return Path(self.prior_file)
-        return self.lib_path / "templates" / "prior_m6250_extend.dat"
+        return PACKAGED_PRIOR
 
     @property
     def eazy_param_template(self) -> Path:
@@ -291,23 +341,37 @@ class VACConfig:
     # Validation / preflight
     # ------------------------------------------------------------------
     def eazy_bin_ok(self) -> bool:
-        """True when ``eazy_bin`` exists and is an executable file."""
+        """True when ``eazy_bin`` is set, exists and is an executable file."""
+        if not self.eazy_bin:
+            return False
         path = str(self.eazy_bin)
+        return os.path.isfile(path) and os.access(path, os.X_OK)
+
+    def fastpp_bin_ok(self) -> bool:
+        """True when ``fastpp_bin`` is set, exists and is an executable file."""
+        if not self.fastpp_bin:
+            return False
+        path = str(self.fastpp_bin)
         return os.path.isfile(path) and os.access(path, os.X_OK)
 
     def _requirement_list(
         self, *, do_photoz: bool, do_sedfit: bool, deep: bool
-    ) -> list[tuple[str, Path, bool, str]]:
+    ) -> list[tuple[str, Path | None, bool, str]]:
         """Every required input as ``(label, path, ok, kind)`` tuples.
 
         ``kind`` is ``"dir"``, ``"file"`` or ``"exe"``; ``ok`` reflects
-        existence (and the executable bit for ``"exe"``). Per-tile external
-        catalogs (REGALADE/VHS/GALEX) are intentionally excluded — they are
-        tile-specific and fetched/checked during the run.
+        existence (and the executable bit for ``"exe"``). A ``None`` path
+        means the input could not even be located (an undiscovered binary, or
+        a directory derived from one), and is always reported as a problem.
+        Per-tile external catalogs (REGALADE/VHS/GALEX) are intentionally
+        excluded — they are tile-specific and fetched/checked during the run.
         """
-        reqs: list[tuple[str, Path, bool, str]] = []
+        reqs: list[tuple[str, Path | None, bool, str]] = []
 
         def add(label: str, path, kind: str) -> None:
+            if path is None or path == "":
+                reqs.append((label, None, False, kind))
+                return
             p = Path(path)
             if kind == "dir":
                 ok = p.is_dir()
@@ -336,19 +400,22 @@ class VACConfig:
             add("EAzY IGM LAF coefficients", tmpl / "LAFcoeff.txt", "file")
             add("EAzY IGM DLA coefficients", tmpl / "DLAcoeff.txt", "file")
             if self.photoz_engine == "binary":
-                add("EAzY binary (photoz_engine='binary')", self.eazy_bin, "exe")
+                add(f"EAzY binary (photoz_engine='binary'; set eazy_bin or "
+                    f"${EAZY_BIN_ENV})", self.eazy_bin, "exe")
             if deep:
                 reqs += self._eazy_template_spectra_reqs(
                     tmpl / "eazy_v1.2_dusty.spectra.param"
                 )
 
         if do_sedfit:
-            add("FAST++ binary", self.fastpp_bin, "exe")
+            add(f"FAST++ binary (set fastpp_bin or ${FASTPP_BIN_ENV})",
+                self.fastpp_bin, "exe")
             add("FAST++ fastpp.param template", self.fastpp_param_template, "file")
             # NB: resolved from the fast++ install's share/ dir by default; a
             # mismatched install prefix is a common cross-machine failure.
+            share = self.fastpp_share
             add("FAST++ template-error file (fastpp_share)",
-                self.fastpp_share / "TEMPLATE_ERROR.fast.v0.2", "file")
+                share / "TEMPLATE_ERROR.fast.v0.2" if share else None, "file")
             add("FAST++ SPS library directory (fastpp_libraries)",
                 self.fastpp_libraries, "dir")
 
@@ -400,7 +467,11 @@ class VACConfig:
         for label, path, ok, kind in self._requirement_list(
             do_photoz=do_photoz, do_sedfit=do_sedfit, deep=deep
         ):
-            if not ok:
+            if ok:
+                continue
+            if path is None:
+                problems.append(f"{label}: {nouns[kind]} not configured")
+            else:
                 problems.append(f"{label}: missing {nouns[kind]} -> {path}")
         if do_photoz and self.photoz_engine == "eazy-py":
             try:
@@ -430,7 +501,8 @@ class VACConfig:
                      "engine=%s)", len(reqs), do_photoz, do_sedfit,
                      self.photoz_engine)
             for label, path, ok, _kind in reqs:
-                log.info("  [%s] %s: %s", "OK  " if ok else "MISS", label, path)
+                log.info("  [%s] %s: %s", "OK  " if ok else "MISS", label,
+                         path if path is not None else "(not set)")
         problems = self.check_requirements(
             do_photoz=do_photoz, do_sedfit=do_sedfit, deep=deep
         )
@@ -457,4 +529,11 @@ class VACConfig:
                        strict=True, verbose=False)
 
 
-__all__ = ["VACConfig", "DEFAULT_MEDIUM_BANDS", "DEFAULT_BROAD_BANDS"]
+__all__ = [
+    "VACConfig",
+    "DEFAULT_MEDIUM_BANDS",
+    "DEFAULT_BROAD_BANDS",
+    "PACKAGED_PRIOR",
+    "FASTPP_BIN_ENV",
+    "EAZY_BIN_ENV",
+]

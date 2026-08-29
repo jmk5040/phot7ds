@@ -17,7 +17,7 @@ import subprocess
 from astropy.io import ascii as ascii_io
 from astropy.table import Table
 
-from .config import VACConfig
+from .config import FASTPP_BIN_ENV, VACConfig
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +56,11 @@ def _build_overrides(cfg: VACConfig, catalog: str, name_zphot: str) -> dict:
     which is both the intended behaviour and a large speedup.
     """
     share = cfg.fastpp_share
+    if share is None:
+        raise FileNotFoundError(
+            "FAST++ share directory could not be derived: neither "
+            "VACConfig.fastpp_share_dir nor fastpp_bin is set."
+        )
     overrides = {
         "CATALOG": catalog,
         "AB_ZEROPOINT": 25.0,
@@ -128,10 +133,12 @@ def run_fastpp(cfg: VACConfig, tile: str, *, name_zphot: str = "z_phot") -> tupl
     Requires the ``.cat`` and ``.zout`` written by the flux/photo-z stages
     in :meth:`VACConfig.sedfit_dir`.
     """
-    if not os.path.exists(cfg.fastpp_bin):
+    if not cfg.fastpp_bin_ok():
+        where = (f"at {cfg.fastpp_bin}" if cfg.fastpp_bin
+                 else f"on ${FASTPP_BIN_ENV} or $PATH")
         raise FileNotFoundError(
-            f"FAST++ binary not found at {cfg.fastpp_bin}; install it or run "
-            "with do_sedfit=False."
+            f"FAST++ binary not found {where}; install it, set "
+            "VACConfig.fastpp_bin, or run with do_sedfit=False."
         )
     sedfit_dir = cfg.sedfit_dir(tile)
     os.makedirs(sedfit_dir, exist_ok=True)

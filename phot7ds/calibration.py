@@ -202,9 +202,8 @@ def calibrate_zeropoints(
     For each ``(band, aperture)``:
 
     1. Build a clean calibration subset: position-matched within
-       ``match_radius_arcsec``,
-       per-band per-aperture ``flags == 0``, reference magnitude in
-       ``mag_range``.
+       ``match_radius_arcsec``, per-band per-aperture
+       ``flags <= band_flag_cut``, reference magnitude in ``mag_range``.
     2. Fit a 2-D spatial ZP and store the corrected column
        ``{aperture}c_mag_{band}`` on the full catalog.
     3. Compute a constant ZP via :func:`astropy.stats.sigma_clipped_stats`
@@ -231,7 +230,13 @@ def calibrate_zeropoints(
         incoord_ra, incoord_dec, refcoord_ra, refcoord_dec,
         match_radius_arcsec=match_radius_arcsec,
     )
-    clean_mask = matched_mask# & (np.asarray(cat["source_flags"]) == 0) # deleted source_flags
+    # Position match alone; the per-band, per-aperture flag cut below is what
+    # rejects bad photometry. A global ``source_flags == 0`` cut used to be
+    # applied here as well, but it is set by the *detection* image and threw
+    # away a large share of otherwise well-measured calibration stars in the
+    # crowded 7DS fields, leaving some band/aperture combinations with too few
+    # stars to fit a ZP surface.
+    clean_mask = matched_mask
 
     for band in band_names:
         band_ref = band.split("-")[0]

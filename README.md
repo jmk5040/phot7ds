@@ -53,10 +53,13 @@ phot7ds/          # repository root (this package)
         ├── crossmatch.py               # REGALADE/VHS/GALEX matching + dedup
         ├── fluxes.py                   # auto-detect filters, extinction-corrected fluxes
         ├── photoz.py                   # eazy-py photo-z (m625 prior, z_m2/z_a)
+        ├── photoz_binary.py            # compiled-EAzY photo-z (default engine)
         ├── sedfit.py                   # FAST++ SED fitting
         ├── catalog.py                  # merge photo-z + SED fits
         ├── report.py                   # per-run log file
-        └── pipeline.py                 # run_value_added()  ← VAC entry
+        ├── pipeline.py                 # run_value_added()  ← VAC entry
+        └── data/
+            └── prior_m6250_desi.dat    # packaged m625 prior (SDSS + DESI BGS)
 ```
 
 ## Installation
@@ -208,7 +211,7 @@ the corresponding config field.
 from phot7ds import PhotometryConfig, run_photometry
 
 cfg = PhotometryConfig(
-    sepp_config_file="/data/data1/7DS/RIS/config/7ds_sepp.config",
+    sepp_config_file="/path_cfg/.../7ds_sepp.config",
     detection_label="DELVE",
     detection_threshold=10.0,
     fixed_apertures_arcsec=(5.0, 10.0),
@@ -235,7 +238,7 @@ result = run_photometry(
 from phot7ds import PhotometryConfig, batch_run
 
 cfg = PhotometryConfig(
-    sepp_config_file="/data/data1/7DS/RIS/config/7ds_sepp.config",
+    sepp_config_file="/path_cfg/.../7ds_sepp.config",
     detection_threshold=10.0,
 )
 
@@ -284,7 +287,7 @@ detection_img, weight_img = build_delve_detection_image(
     tile_info=tile_info,
     imgtype="image",
     output_path="/data/.../detect_imgs/T01234",
-    swarp_cfg_path="/data/data1/7DS/RIS/config/7ds.swarp",
+    swarp_cfg_path="/path_cfg/.../7ds.swarp",
 )
 # SWarp center defaults to round(tile_info['ra'], 4) / round(tile_info['dec'], 4)
 # converted to sexagesimal. Override with ra_center= / dec_center= if needed.
@@ -340,8 +343,13 @@ For each `(band, aperture)`:
    `match_radius_arcsec` (default 1″).
 2. The calibration subset requires:
    - matched within the radius,
-   - `source_flags == 0` and per-band per-aperture `flags == 0`,
+   - per-band per-aperture `flags <= band_flag_cut` (default `0`),
    - reference magnitude inside `mag_range` (default 12–16).
+
+   There is deliberately **no** global `source_flags == 0` cut: that flag comes
+   from the detection image and discarded too many otherwise well-measured
+   calibration stars in crowded fields. Raise `band_flag_cut` to admit
+   higher-flagged measurements when a band is short of calibrators.
 3. A 2-D polynomial zero-point surface is fit (`spatial_poly_degree`,
    default 2). The spatially-corrected magnitude is written to
    `{aperture}c_mag_{band}` on the full catalog.
@@ -487,11 +495,22 @@ pip install -e ".[vac]"     # eazy, sfdmap2, extinction
 
 You also need:
 
-- the compiled `fast++` binary (default path
-  `/home/jmkastro/fastpp/bin/fast++`, override via `VACConfig.fastpp_bin`),
+- the compiled `fast++` and `eazy` binaries,
 - the EAzY/FAST++ config tree under `lib_dir` (templates, `FILTER.RES.latest`,
   `default.translate`, priors, SPS libraries),
 - SFD dust maps (default `lib_dir/sfddata`, override via `sfd_dir`).
+
+The two binaries are **discovered**, not hard-coded: an explicit
+`VACConfig.fastpp_bin` / `eazy_bin` wins, then `$PHOT7DS_FASTPP_BIN` /
+`$PHOT7DS_EAZY_BIN`, then `$PATH`. When none of those turns one up the field
+stays `None` and the stage that needs it fails in `preflight()` with
+`not configured` rather than chasing a path that only existed on someone
+else's machine.
+
+```bash
+export PHOT7DS_FASTPP_BIN=/opt/fastpp/bin/fast++
+export PHOT7DS_EAZY_BIN=/opt/eazy/src/eazy
+```
 
 ### Quick start
 
@@ -499,21 +518,21 @@ You also need:
 from phot7ds.vac import VACConfig, run_value_added
 
 config = VACConfig(
-    lib_dir="/data/data1/7DS/RIS/config/LIB",
-    catalog_dir="/data/data1/7DS/RIS/catalog",
-    output_root="/data/data1/7DS/RIS/results/vac",
-    fastpp_bin="/home/jmkastro/fastpp/bin/fast++",
+    lib_dir="/path_cfg/.../LIB",
+    catalog_dir="/path_cat/.../catalog",
+    output_root="/path_res/.../vac",
+    # fastpp_bin / eazy_bin omitted -> taken from the environment or $PATH
     detection_ref="7DS",
     aperture="aper05c",
     auto_download=True,   # fetch missing REGALADE/VHS/GALEX via VizieR
-    prior_band="m625",    # default 7DS m625 magnitude prior
+    prior_band="m625",    # packaged 7DS m625 magnitude prior
     use_vhs=True, use_galex=True, use_wise=True,
 )
 
 result = run_value_added(
     catalog_path="/data/.../T00236/T00236_7DS_phot.fits",
     tile="T00236",
-    tile_table="/data/data1/7DS/RIS/config/7DT_tiles.fits",
+    tile_table="/path_cfg/.../7DT_tiles.fits",
     config=config,
     do_photoz=True,
     do_sedfit=True,
@@ -608,19 +627,40 @@ optional catalogs (the run proceeds and skips those bands); a missing
 
 ### Magnitude prior and the redshift column
 
-The default prior is the 7DS **m625** prior
-(`templates/prior_m6250_extend.dat`, band `m625`). When the prior band's flux
-(`f_7DS_m625`, i.e. `aper05c_mag_m625`) is present the prior is applied and
-the redshift column handed to FAST++ is **`z_m2`**; when it is absent a
-warning is logged, the run proceeds **without** a prior, and the column is
-**`z_a`**. FAST++ `NAME_ZPHOT` is pointed at whichever column is produced.
-Override with `prior_band=` / `prior_file=`.
+The default prior is the 7DS **m625** prior, and since v0.5.0 it **ships with
+the package** as `phot7ds/vac/data/prior_m6250_desi.dat` — a run no longer
+depends on which prior happens to sit in the user's LIB tree.
+
+It is a Benitez (2000) `p(z|m) ~ z^a exp(-(z/zm(m))^a)` prior fitted jointly to
+
+- **SDSS DR16** spectroscopic redshifts, which anchor the bright end on the
+  `m625 = r_SDSS - 0.2` system (complete to `m625 < 17.55`), and
+- **DESI DR1 BGS_BRIGHT**, a purely flux-limited `r < 19.5` sample that pushes
+  the empirical anchor to `m625 < 19.25`, after an offset that maps the
+  DECam-based DESI magnitudes onto the same system.
+
+`ln zm(m)` is fit quadratically because the DESI bins show `d ln z / dm`
+flattening from ~0.40 to ~0.33 per mag, which a linear law cannot follow;
+fainter than the anchor the prior is that quadratic extrapolation.
+
+This replaces the EL-COSMOS-derived `prior_m6250_extend.dat` that earlier
+releases expected in `lib_dir/templates/`. That one is mis-calibrated at the
+bright end — it confines bright nearby galaxies to a prior ridge well above
+their true redshifts — so **runs that relied on the old default will shift**.
+Pass `prior_file=` to pin any other table (including the old one), and
+`prior_band=` to change the band.
+
+When the prior band's flux (`f_7DS_m625`, i.e. `aper05c_mag_m625`) is present
+the prior is applied and the redshift column handed to FAST++ is **`z_m2`**;
+when it is absent a warning is logged, the run proceeds **without** a prior,
+and the column is **`z_a`**. FAST++ `NAME_ZPHOT` is pointed at whichever
+column is produced.
 
 ### Photo-z engine (`photoz_engine`)
 
 `VACConfig.photoz_engine` selects the redshift backend and defaults to
-`"binary"`, which runs the compiled EAzY executable at
-`VACConfig.eazy_bin` (default `/data/data1/7DS/RIS/config/eazy/src/eazy`).
+`"binary"`, which runs the compiled EAzY executable at `VACConfig.eazy_bin`
+(discovered from `$PHOT7DS_EAZY_BIN` or `$PATH` when not set explicitly).
 The binary writes its native `.zout` — which already carries `z_m2`/`z_a`
 plus the `l68/u68`, `l95/u95`, `l99/u99` confidence intervals FAST++ needs —
 and that file is copied straight into the SED-fit directory. Set
