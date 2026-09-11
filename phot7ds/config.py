@@ -94,6 +94,10 @@ class PhotometryConfig:
 
     # --- Diagnostics ---
     save_residual_plots: bool = False
+    # Keep the auto-built union coverage mask (``{run_name}_mask.fits``) in
+    # the work dir. By default it is written to the staging dir, used for the
+    # depth estimate and discarded with the bitmasks.
+    save_coverage_mask: bool = False
     plot_axiscolor: str = "elongation"
 
     # --- Depth estimation ---

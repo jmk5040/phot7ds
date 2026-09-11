@@ -119,7 +119,9 @@ phot7ds/
   in `finally`; stale dirs of dead PIDs swept at start. Columns
   `mask_flags_<band>` (OR over isophote) / `mask_npix_<band>`. The union
   `isophotal_image_flags_cover` column is gone (bit 128 is per band); the
-  coverage mask is still built for depths only. Absent/partial/broken MEFs →
+  union coverage mask is still built (depth empty apertures, `MSKRATIO`) but
+  into the staging dir and deleted at the end unless `save_coverage_mask=True`
+  (then `{run_name}_mask.fits` in work_dir + `COVMASK`). Absent/partial/broken MEFs →
   coverage-only bitmask (128 only) + warning + `status` in manifest
   `band_masks`; never fatal. `count_masks=` accepts None (auto, follows
   symlinks) / dir / `{band: path}` / list (matched by `FILTER`).

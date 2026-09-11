@@ -113,7 +113,7 @@ broadbands (`G`/`R`/`I`/`Z`) and three digits for medium-bands
 | `PHOTPY`   | Python interpreter version                       |
 | `DETLABEL` | `'DELVE'` or `'7DT'`                             |
 | `DETIMG`   | Detection image basename                         |
-| `COVMASK`  | Coverage mask basename                           |
+| `COVMASK`  | Coverage mask basename (only when supplied or `save_coverage_mask`) |
 | `BADPMASK` | Bad-pixel mask basename (if any)                 |
 | `REFCAT`   | Reference catalog basename                       |
 | `NSCIIMG`  | Number of measurement images                     |

@@ -479,6 +479,7 @@ def run_photometry(
     polygon_margin: float | None = None,
     # --- Diagnostics (override config) ---
     save_residual_plots: bool | None = None,
+    save_coverage_mask: bool | None = None,
     plot_axiscolor: str | None = None,
     # --- Depth estimation (override config) ---
     estimate_depth: bool | None = None,
@@ -520,11 +521,14 @@ def run_photometry(
         Path to the SourceExtractor++ ``--config-file``. Required (either
         via this kwarg or via ``config.sepp_config_file``).
     coverage_mask
-        Path to a precomputed coverage mask. If ``None``, one is built next
-        to the output catalog by :func:`phot7ds.images.build_coverage_mask`.
-        It drives the depth estimate; it is only passed to SE++ as a flag
-        image (``isophotal_image_flags_cover``) when ``per_band_masks`` is
-        off, because the per-band bit 128 supersedes it.
+        Path to a precomputed coverage mask. If ``None``, one is built by
+        :func:`phot7ds.images.build_coverage_mask` in the mask staging
+        directory, used for the depth estimate (empty-aperture placement) and
+        discarded at the end of the run unless ``save_coverage_mask`` is set,
+        in which case it is written to ``output_dir`` as
+        ``{run_name}_mask.fits``. It is only passed to SE++ as a flag image
+        (``isophotal_image_flags_cover``) when ``per_band_masks`` is off,
+        because the per-band bit 128 supersedes it.
     badpix_mask
         Optional bad-pixel mask FITS path passed to SE++ as
         ``--flag-image-badpix``.
@@ -582,7 +586,7 @@ def run_photometry(
         SourceExtractor++ tuning overrides.
     match_radius_arcsec, mag_range, spatial_poly_degree, polygon_margin
         Calibration overrides.
-    save_residual_plots, plot_axiscolor
+    save_residual_plots, save_coverage_mask, plot_axiscolor
         Diagnostic overrides.
     estimate_depth, depth_n_sigma, depth_apertures,
     depth_n_empty_apertures, depth_empty_aperture, depth_seed
@@ -640,254 +644,266 @@ def run_photometry(
             "deduplicate the input list."
         )
 
-    mask_ratio: float | None = None
-    if coverage_mask is None:
-        coverage_mask, mask_ratio = build_coverage_mask(
-            detection_image=detection_image,
-            science_images=sciimgs,
-            output_path=str(work_dir / f"{run_name}_mask.fits"),
-            overwrite=overwrite,
-            max_masked_fraction=cfg.coverage_mask_max_fraction,
-        )
-        # build_coverage_mask returns (None, None) when the images are not on
-        # the common detection grid; the pipeline then runs without a mask.
-        if coverage_mask is None:
-            log.info("No coverage mask used for this run (shape mismatch).")
-    else:
-        try:
-            with fits.open(coverage_mask) as hdul:
-                v = hdul[0].header.get("MSKRATIO")
-                mask_ratio = float(v) if v is not None else None
-        except Exception:
-            mask_ratio = None
-
-    band_names, saturation_values = extract_band_names_and_saturation(sciimgs)
-    log.info("Per-image bands: %s", band_names)
-
-    det_hdr = fits.getheader(detection_image)
-    det_gain = float(det_hdr.get("GAIN", 1.0))
-    det_saturate = float(det_hdr.get("SATURATE", 60000.0))
-
-    aper_radius_pix = [
-        round(aper / cfg.pixscale_arcsec, 3)
-        for aper in cfg.fixed_apertures_arcsec
-    ]
-
-    python_config_file = str(work_dir / f"{run_name}_sepp.py")
-    generate_sepp_python_config(
-        config_file=python_config_file,
-        sciimgs=sciimgs,
-        band_names=band_names,
-        saturation_values=saturation_values,
-        gain=det_gain,
-        aperture_photometry=True,
-        aper_radius_pix=aper_radius_pix,
-        fixed_apertures=list(cfg.fixed_apertures_arcsec),
+    # Scratch space for the run: per-band bitmasks (freed right after SE++)
+    # and the auto-built coverage mask (needed until the depth estimate).
+    # /dev/shm when available, else the work dir; removed in the finally.
+    staging = MaskStaging(
+        run_name,
+        staging_dir=cfg.mask_staging_dir or None,
+        fallback_dir=work_dir,
+        workers=cfg.mask_workers,
     )
-
-    # Per-band bitmasks (bits 1-64 from the count-map MEF, 128 = no data in
-    # that band). They replace the union coverage flag image for SE++; the
-    # coverage mask itself is kept for the depth estimate.
-    band_masks: dict[str, BandMaskInfo] = {}
-    flag_images: list[FlagImage] = []
-    sepp_coverage_mask: str | None = coverage_mask
-    staging: MaskStaging | None = None
-    if cfg.per_band_masks:
-        det_shape = tuple(int(det_hdr[f"NAXIS{i}"]) for i in range(int(det_hdr.get("NAXIS", 2)), 0, -1))
-        band_to_image = dict(zip(band_names, sciimgs))
-        band_to_mef = resolve_count_masks(
-            sciimgs, band_names, count_masks, suffix=cfg.count_mask_suffix,
-        )
-        staging = MaskStaging(
-            run_name,
-            staging_dir=cfg.mask_staging_dir or None,
-            fallback_dir=work_dir,
-            workers=cfg.mask_workers,
-        )
-        band_masks = staging.stage(
-            band_to_image, band_to_mef, det_shape, use_nused=cfg.mask_use_nused,
-        )
-        flag_images = [
-            FlagImage(band, info.bitmask, cfg.mask_flag_type)
-            for band, info in band_masks.items()
-        ]
-        if flag_images:
-            sepp_coverage_mask = None
-        else:
-            log.warning("No per-band bitmask could be built; falling back to the coverage flag image.")
-
     try:
-        cmd = build_sepp_command(
-            python_config_file=python_config_file,
-            sepp_config_file=cfg.sepp_config_file,
-            detection_image=detection_image,
-            detection_gain=det_gain,
-            detection_saturate=det_saturate,
-            catalog_path=str(raw_catalog_path),
-            coverage_mask=sepp_coverage_mask,
-            badpix_mask=badpix_mask,
-            flag_images=flag_images,
-            detection_threshold=cfg.detection_threshold,
-            detection_minimum_area=cfg.detection_minimum_area,
-            auto_kron_min_radius=cfg.auto_kron_min_radius,
-            auto_kron_factor=cfg.auto_kron_factor,
-            background_cell_size=cfg.background_cell_size,
-            smoothing_box_size=cfg.smoothing_box_size,
-            partition_threshold_count=cfg.partition_threshold_count,
-            partition_minimum_area=cfg.partition_minimum_area,
-            partition_minimum_contrast=cfg.partition_minimum_contrast,
-            flux_fractions=cfg.flux_fractions,
-            clean_param=cfg.cleaning_minimum_area,
-            thread_count=cfg.thread_count,
-            log_file=str(log_file),
+        mask_ratio: float | None = None
+        # The coverage mask is a run product only when the caller supplied it
+        # or asked to keep it; otherwise it lives in the staging dir.
+        coverage_mask_kept = coverage_mask is not None or cfg.save_coverage_mask
+        if coverage_mask is None:
+            mask_name = f"{run_name}_mask.fits"
+            coverage_mask, mask_ratio = build_coverage_mask(
+                detection_image=detection_image,
+                science_images=sciimgs,
+                output_path=str(work_dir / mask_name if cfg.save_coverage_mask
+                                else staging.path(mask_name)),
+                overwrite=overwrite,
+                max_masked_fraction=cfg.coverage_mask_max_fraction,
+            )
+            # build_coverage_mask returns (None, None) when the images are not on
+            # the common detection grid; the pipeline then runs without a mask.
+            if coverage_mask is None:
+                log.info("No coverage mask used for this run (shape mismatch).")
+        else:
+            try:
+                with fits.open(coverage_mask) as hdul:
+                    v = hdul[0].header.get("MSKRATIO")
+                    mask_ratio = float(v) if v is not None else None
+            except Exception:
+                mask_ratio = None
+
+        band_names, saturation_values = extract_band_names_and_saturation(sciimgs)
+        log.info("Per-image bands: %s", band_names)
+
+        det_hdr = fits.getheader(detection_image)
+        det_gain = float(det_hdr.get("GAIN", 1.0))
+        det_saturate = float(det_hdr.get("SATURATE", 60000.0))
+
+        aper_radius_pix = [
+            round(aper / cfg.pixscale_arcsec, 3)
+            for aper in cfg.fixed_apertures_arcsec
+        ]
+
+        python_config_file = str(work_dir / f"{run_name}_sepp.py")
+        generate_sepp_python_config(
+            config_file=python_config_file,
+            sciimgs=sciimgs,
+            band_names=band_names,
+            saturation_values=saturation_values,
+            gain=det_gain,
+            aperture_photometry=True,
+            aper_radius_pix=aper_radius_pix,
+            fixed_apertures=list(cfg.fixed_apertures_arcsec),
         )
-        run_sepp(cmd, check=True)
-    finally:
-        if staging is not None:
-            staging.cleanup()
 
-    cat = split_array_columns_to_per_filter(
-        str(raw_catalog_path),
-        band_names=band_names,
-        flux_fractions=cfg.flux_fractions,
-        overwrite=True,
-        fixed_apertures=list(cfg.fixed_apertures_arcsec),
-    )
-    if cat is None:
-        raise RuntimeError("SE++ catalog could not be loaded for post-processing")
-    if band_masks:
-        renamed = rename_mask_columns(cat, list(band_masks))
-        log.info("Per-band mask columns: %d (%s ...); bits %s", len(renamed),
-                 ", ".join(list(renamed.values())[:2]), maskbits_description())
+        # Per-band bitmasks (bits 1-64 from the count-map MEF, 128 = no data in
+        # that band). They replace the union coverage flag image for SE++; the
+        # coverage mask itself is kept for the depth estimate.
+        band_masks: dict[str, BandMaskInfo] = {}
+        flag_images: list[FlagImage] = []
+        sepp_coverage_mask: str | None = coverage_mask
+        if cfg.per_band_masks:
+            det_shape = tuple(int(det_hdr[f"NAXIS{i}"]) for i in range(int(det_hdr.get("NAXIS", 2)), 0, -1))
+            band_to_image = dict(zip(band_names, sciimgs))
+            band_to_mef = resolve_count_masks(
+                sciimgs, band_names, count_masks, suffix=cfg.count_mask_suffix,
+            )
+            band_masks = staging.stage(
+                band_to_image, band_to_mef, det_shape, use_nused=cfg.mask_use_nused,
+            )
+            flag_images = [
+                FlagImage(band, info.bitmask, cfg.mask_flag_type)
+                for band, info in band_masks.items()
+            ]
+            if flag_images:
+                sepp_coverage_mask = None
+            else:
+                log.warning("No per-band bitmask could be built; falling back to the coverage flag image.")
 
-    ref_cat = load_gaiaxp_reference(
-        reference_catalog,
-        bands=band_names,
-        tile_info=tile_info,
-        margin=cfg.polygon_margin,
-    )
-    if len(ref_cat) == 0:
-        log.warning("No Gaia XP reference sources within tile polygon")
+        try:
+            cmd = build_sepp_command(
+                python_config_file=python_config_file,
+                sepp_config_file=cfg.sepp_config_file,
+                detection_image=detection_image,
+                detection_gain=det_gain,
+                detection_saturate=det_saturate,
+                catalog_path=str(raw_catalog_path),
+                coverage_mask=sepp_coverage_mask,
+                badpix_mask=badpix_mask,
+                flag_images=flag_images,
+                detection_threshold=cfg.detection_threshold,
+                detection_minimum_area=cfg.detection_minimum_area,
+                auto_kron_min_radius=cfg.auto_kron_min_radius,
+                auto_kron_factor=cfg.auto_kron_factor,
+                background_cell_size=cfg.background_cell_size,
+                smoothing_box_size=cfg.smoothing_box_size,
+                partition_threshold_count=cfg.partition_threshold_count,
+                partition_minimum_area=cfg.partition_minimum_area,
+                partition_minimum_contrast=cfg.partition_minimum_contrast,
+                flux_fractions=cfg.flux_fractions,
+                clean_param=cfg.cleaning_minimum_area,
+                thread_count=cfg.thread_count,
+                log_file=str(log_file),
+            )
+            run_sepp(cmd, check=True)
+        finally:
+            # 1.6 GB of bitmasks are not needed past SE++; the coverage mask
+            # stays for the depth estimate and goes with the whole dir later.
+            staging.remove_bitmasks()
 
-    plot_dir = str(work_dir / "figures") if cfg.save_residual_plots else None
-    calibrate_zeropoints(
-        cat,
-        ref_cat=ref_cat,
-        band_names=band_names,
-        apertures=list(cfg.apertures),
-        match_radius_arcsec=cfg.match_radius_arcsec,
-        mag_range=cfg.mag_range,
-        spatial_poly_degree=cfg.spatial_poly_degree,
-        plot_residuals=cfg.save_residual_plots,
-        plot_dir=plot_dir,
-        plot_title_extra=run_name,
-    )
+        cat = split_array_columns_to_per_filter(
+            str(raw_catalog_path),
+            band_names=band_names,
+            flux_fractions=cfg.flux_fractions,
+            overwrite=True,
+            fixed_apertures=list(cfg.fixed_apertures_arcsec),
+        )
+        if cat is None:
+            raise RuntimeError("SE++ catalog could not be loaded for post-processing")
+        if band_masks:
+            renamed = rename_mask_columns(cat, list(band_masks))
+            log.info("Per-band mask columns: %d (%s ...); bits %s", len(renamed),
+                     ", ".join(list(renamed.values())[:2]), maskbits_description())
 
-    # Persist constant ZP + scatter as FITS-safe header keys
-    # (e.g. ZP05MG, ZE05MG, ZP10M575).
-    zeropoints_to_meta(
-        cat.meta,
-        cat.meta.get("zeropoints"),
-        cat.meta.get("zeropoint_scatter"),
-    )
-
-    depth_results: dict = {}
-    if cfg.estimate_depth:
-        depth_apertures = [a for a in cfg.depth_apertures if a in cfg.apertures]
-        if not depth_apertures:
-            depth_apertures = list(cfg.apertures)
-        zeropoints = cat.meta.get("zeropoints")
-        band_to_image = dict(zip(band_names, sciimgs))
-        depth_results = estimate_depths(
-            cat,
+        ref_cat = load_gaiaxp_reference(
+            reference_catalog,
             bands=band_names,
-            apertures=depth_apertures,
-            n_sigma=cfg.depth_n_sigma,
-            pixscale_arcsec=cfg.pixscale_arcsec,
-            science_images=band_to_image,
-            coverage_mask=coverage_mask,
-            zeropoints=zeropoints,
-            n_empty_apertures=cfg.depth_n_empty_apertures,
-            seed=cfg.depth_seed,
-            do_error_curve=True,
-            do_empty_apertures=cfg.depth_empty_aperture,
+            tile_info=tile_info,
+            margin=cfg.polygon_margin,
         )
-        if depth_results:
+        if len(ref_cat) == 0:
+            log.warning("No Gaia XP reference sources within tile polygon")
+
+        plot_dir = str(work_dir / "figures") if cfg.save_residual_plots else None
+        calibrate_zeropoints(
+            cat,
+            ref_cat=ref_cat,
+            band_names=band_names,
+            apertures=list(cfg.apertures),
+            match_radius_arcsec=cfg.match_radius_arcsec,
+            mag_range=cfg.mag_range,
+            spatial_poly_degree=cfg.spatial_poly_degree,
+            plot_residuals=cfg.save_residual_plots,
+            plot_dir=plot_dir,
+            plot_title_extra=run_name,
+        )
+
+        # Persist constant ZP + scatter as FITS-safe header keys
+        # (e.g. ZP05MG, ZE05MG, ZP10M575).
+        zeropoints_to_meta(
+            cat.meta,
+            cat.meta.get("zeropoints"),
+            cat.meta.get("zeropoint_scatter"),
+        )
+
+        depth_results: dict = {}
+        if cfg.estimate_depth:
+            depth_apertures = [a for a in cfg.depth_apertures if a in cfg.apertures]
+            if not depth_apertures:
+                depth_apertures = list(cfg.apertures)
+            zeropoints = cat.meta.get("zeropoints")
+            band_to_image = dict(zip(band_names, sciimgs))
+            depth_results = estimate_depths(
+                cat,
+                bands=band_names,
+                apertures=depth_apertures,
+                n_sigma=cfg.depth_n_sigma,
+                pixscale_arcsec=cfg.pixscale_arcsec,
+                science_images=band_to_image,
+                coverage_mask=coverage_mask,
+                zeropoints=zeropoints,
+                n_empty_apertures=cfg.depth_n_empty_apertures,
+                seed=cfg.depth_seed,
+                do_error_curve=True,
+                do_empty_apertures=cfg.depth_empty_aperture,
+            )
+            if depth_results:
+                log.info(
+                    "%d-sigma depth summary:\n%s",
+                    int(round(cfg.depth_n_sigma)),
+                    format_depth_table(depth_results, n_sigma=cfg.depth_n_sigma),
+                )
+                depth_results_to_meta(
+                    cat.meta, depth_results, n_sigma=cfg.depth_n_sigma,
+                )
+
+        strip_nonfits_units(cat)
+        # Drop dict-valued meta entries (zeropoints map etc.) that cannot survive
+        # the FITS header round-trip; keep them on the in-memory table only.
+        for _k in list(cat.meta):
+            if isinstance(cat.meta[_k], dict):
+                del cat.meta[_k]
+        _annotate_catalog_meta(
+            cat.meta,
+            detection_image=detection_image,
+            coverage_mask=coverage_mask if coverage_mask_kept else None,
+            badpix_mask=badpix_mask,
+            reference_catalog=reference_catalog,
+            science_images=sciimgs,
+            detection_label=cfg.detection_label,
+            mask_ratio=mask_ratio,
+            cfg=cfg,
+            run_name=run_name,
+            band_masks=band_masks or None,
+            mask_staging=staging.location,
+        )
+        if standardize_catalog:
+            schema = build_canonical_schema(
+                bands=cfg.bands,
+                apertures=cfg.apertures,
+                flux_fractions=cfg.flux_fractions,
+                per_band_masks=bool(band_masks),
+            )
+            cat = apply_standard_catalog(cat, schema)
             log.info(
-                "%d-sigma depth summary:\n%s",
-                int(round(cfg.depth_n_sigma)),
-                format_depth_table(depth_results, n_sigma=cfg.depth_n_sigma),
+                "Unified schema: %d cols (placeholders=%d, dropped_dups=%d, extras=%d)",
+                len(cat.colnames),
+                cat.meta.get("NPLACE", 0),
+                cat.meta.get("NDUPS", 0),
+                cat.meta.get("NEXTRA", 0),
             )
-            depth_results_to_meta(
-                cat.meta, depth_results, n_sigma=cfg.depth_n_sigma,
-            )
+        cat.write(str(zp_catalog_path), format="fits", overwrite=True)
 
-    strip_nonfits_units(cat)
-    # Drop dict-valued meta entries (zeropoints map etc.) that cannot survive
-    # the FITS header round-trip; keep them on the in-memory table only.
-    for _k in list(cat.meta):
-        if isinstance(cat.meta[_k], dict):
-            del cat.meta[_k]
-    _annotate_catalog_meta(
-        cat.meta,
-        detection_image=detection_image,
-        coverage_mask=coverage_mask,
-        badpix_mask=badpix_mask,
-        reference_catalog=reference_catalog,
-        science_images=sciimgs,
-        detection_label=cfg.detection_label,
-        mask_ratio=mask_ratio,
-        cfg=cfg,
-        run_name=run_name,
-        band_masks=band_masks or None,
-        mask_staging=staging.location if staging is not None else None,
-    )
-    if standardize_catalog:
-        schema = build_canonical_schema(
-            bands=cfg.bands,
-            apertures=cfg.apertures,
-            flux_fractions=cfg.flux_fractions,
-            per_band_masks=bool(band_masks),
-        )
-        cat = apply_standard_catalog(cat, schema)
-        log.info(
-            "Unified schema: %d cols (placeholders=%d, dropped_dups=%d, extras=%d)",
-            len(cat.colnames),
-            cat.meta.get("NPLACE", 0),
-            cat.meta.get("NDUPS", 0),
-            cat.meta.get("NEXTRA", 0),
-        )
-    cat.write(str(zp_catalog_path), format="fits", overwrite=True)
-
-    manifest = {
-        "run_name": run_name,
-        "detection_image": str(detection_image),
-        "detection_label": cfg.detection_label,
-        "coverage_mask": str(coverage_mask) if coverage_mask else None,
-        "coverage_mask_used_by_sepp": bool(sepp_coverage_mask),
-        "mask_ratio": mask_ratio,
-        "badpix_mask": str(badpix_mask) if badpix_mask else None,
-        "reference_catalog": str(reference_catalog),
-        "science_images": list(sciimgs),
-        "config": cfg.to_dict(),
-    }
-    if band_masks:
-        manifest["band_masks"] = {
-            "bits": {name: int(bit) for name, bit in MASKBIT.items()} | {"NODATA": int(NODATA_BIT)},
-            "columns": [mask_flags_column(b) for b in band_masks] + [mask_npix_column(b) for b in band_masks],
-            "staging": staging.location if staging is not None else None,
-            "staging_seconds": round(staging.seconds, 2) if staging is not None and staging.seconds else None,
-            "bands": {band: info.to_dict() for band, info in band_masks.items()},
+        manifest = {
+            "run_name": run_name,
+            "detection_image": str(detection_image),
+            "detection_label": cfg.detection_label,
+            "coverage_mask": str(coverage_mask) if coverage_mask and coverage_mask_kept else None,
+            "coverage_mask_saved": bool(coverage_mask and coverage_mask_kept),
+            "coverage_mask_used_by_sepp": bool(sepp_coverage_mask),
+            "mask_ratio": mask_ratio,
+            "badpix_mask": str(badpix_mask) if badpix_mask else None,
+            "reference_catalog": str(reference_catalog),
+            "science_images": list(sciimgs),
+            "config": cfg.to_dict(),
         }
-    if depth_results:
-        manifest["depths"] = {
-            f"{aper}__{band}": entry
-            for (aper, band), entry in depth_results.items()
-        }
-    with open(manifest_path, "w") as f:
-        json.dump(manifest, f, indent=2)
+        if band_masks:
+            manifest["band_masks"] = {
+                "bits": {name: int(bit) for name, bit in MASKBIT.items()} | {"NODATA": int(NODATA_BIT)},
+                "columns": [mask_flags_column(b) for b in band_masks] + [mask_npix_column(b) for b in band_masks],
+                "staging": staging.location,
+                "staging_seconds": round(staging.seconds, 2) if staging.seconds else None,
+                "bands": {band: info.to_dict() for band, info in band_masks.items()},
+            }
+        if depth_results:
+            manifest["depths"] = {
+                f"{aper}__{band}": entry
+                for (aper, band), entry in depth_results.items()
+            }
+        with open(manifest_path, "w") as f:
+            json.dump(manifest, f, indent=2)
 
-    log.info("Wrote calibrated catalog: %s", zp_catalog_path)
+        log.info("Wrote calibrated catalog: %s", zp_catalog_path)
+    finally:
+        staging.cleanup()
 
     return PhotometryResult(
         catalog_path=str(zp_catalog_path),

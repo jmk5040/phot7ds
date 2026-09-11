@@ -206,8 +206,12 @@ def resolve_count_masks(
             out[band] = path
 
     n_found = sum(1 for v in out.values() if v)
-    log.info("Count-map MEFs: %d/%d bands (%s without: coverage-only bitmask)",
-             n_found, len(out), ",".join(b for b, v in out.items() if not v) or "none")
+    missing = [b for b, v in out.items() if not v]
+    if missing:
+        log.warning("Count-map MEFs: %d/%d bands; coverage-only bitmask (bit %d only) for %s",
+                    n_found, len(out), NODATA_BIT, ",".join(missing))
+    else:
+        log.info("Count-map MEFs: %d/%d bands", n_found, len(out))
     return out
 
 
@@ -445,6 +449,11 @@ class MaskStaging:
     def location(self) -> str:
         return "tmpfs" if str(self.root).startswith("/dev/shm") else "disk"
 
+    def path(self, name: str) -> str:
+        """Path for an extra scratch file inside the staging dir (created on demand)."""
+        self.dir.mkdir(parents=True, exist_ok=True)
+        return str(self.dir / name)
+
     def stage(
         self,
         band_images: Mapping[str, str],
@@ -489,6 +498,18 @@ class MaskStaging:
             len(self.infos), len(jobs), n_mef, self.dir, self.location, total_mb, self.seconds,
         )
         return dict(self.infos)
+
+    def remove_bitmasks(self) -> None:
+        """Delete the per-band bitmasks only (other scratch files stay)."""
+        n = 0
+        for info in self.infos.values():
+            try:
+                os.remove(info.bitmask)
+                n += 1
+            except FileNotFoundError:
+                pass
+        if n:
+            log.info("Removed %d band bitmask(s) from %s", n, self.dir)
 
     def cleanup(self) -> None:
         if self.dir.exists():

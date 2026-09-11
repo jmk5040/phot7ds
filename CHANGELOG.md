@@ -57,9 +57,18 @@ out with `mask_flags == 0` / `< 4`.
   and columns. The VAC coverage cut (`vac.pipeline._load_catalog`) accepts
   both: it uses `cover_flag_column` when present, otherwise rejects sources
   with bit 128 in any band, which reproduces the old selection.
+- **`{run_name}_mask.fits` is no longer written to the output directory.**
+  The union coverage mask is still built — it places the empty apertures of
+  the depth estimate and yields `MSKRATIO` — but in the mask staging
+  directory (tmpfs), and it is removed with it once the run is over. Set
+  `save_coverage_mask=True` (kwarg or `PhotometryConfig`) to keep it in
+  `output_dir` as before; `COVMASK` is written only when the file survives.
+  Per-band bitmasks are freed as soon as SE++ returns.
 - `build_coverage_mask` treats non-finite pixels as no-data, not only zeros.
 - `build_canonical_schema(..., per_band_masks=True)` appends the mask
   columns after the basic block.
+- `resolve_count_masks` logs a WARNING (not INFO) listing the bands that
+  fell back to a coverage-only bitmask.
 
 ### Fixed
 

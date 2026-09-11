@@ -241,6 +241,19 @@ def test_mask_staging_partial_mefs_and_cleanup(tmp_path: Path) -> None:
     assert not staging.dir.exists()
 
 
+def test_mask_staging_remove_bitmasks_keeps_other_scratch(tmp_path: Path) -> None:
+    imgs = {"m525": str(_write_coadd(tmp_path / "T_m525_coadd.fits", "m525"))}
+    staging = MaskStaging("run", staging_dir=tmp_path, fallback_dir=tmp_path, workers=1)
+    cover = Path(staging.path("run_mask.fits"))
+    cover.write_bytes(b"0")
+    infos = staging.stage(imgs, {"m525": None}, SHAPE)
+    staging.remove_bitmasks()
+    assert not Path(infos["m525"].bitmask).exists()
+    assert cover.exists()                                    # coverage mask survives until cleanup
+    staging.cleanup()
+    assert not cover.exists() and not staging.dir.exists()
+
+
 def test_mask_staging_falls_back_when_tmpfs_unavailable(tmp_path: Path) -> None:
     staging = MaskStaging("run", staging_dir=tmp_path / "nope", fallback_dir=tmp_path, workers=1)
     assert staging.root == tmp_path and staging.location == "disk"
@@ -347,6 +360,21 @@ def test_config_and_run_photometry_expose_mask_knobs() -> None:
     cfg = PhotometryConfig()
     assert cfg.per_band_masks is True and cfg.mask_staging_dir == "/dev/shm"
     assert cfg.count_mask_suffix == "_counts.fits" and cfg.mask_flag_type == "or"
+    assert cfg.save_coverage_mask is False
     params = inspect.signature(run_photometry).parameters
-    for name in ("count_masks", "per_band_masks", "mask_staging_dir", "mask_use_nused"):
+    for name in ("count_masks", "per_band_masks", "mask_staging_dir", "mask_use_nused",
+                 "save_coverage_mask"):
         assert name in params
+
+
+def test_find_count_mask_from_original_path(tmp_path: Path) -> None:
+    """Users normally pass the pipeline's own coadd path (not a symlink)."""
+    coadd = _write_coadd(tmp_path / "T08147_m525_7DT02_20251126_044310_300s_coadd.fits", "m525")
+    assert find_count_mask(coadd) is None
+    mef = _write_mef(tmp_path / "T08147_m525_7DT02_20251126_044310_300s_coadd_counts.fits", "m525")
+    assert find_count_mask(coadd) == str(mef)
+    # a MEF from another coadd run (different timestamp) is *not* picked up
+    other = _write_mef(tmp_path / "T08147_m525_7DT02_20251126_044124_300s_coadd_counts.fits", "m525")
+    assert find_count_mask(coadd) == str(mef)
+    mef.unlink()
+    assert find_count_mask(coadd) is None and other.exists()

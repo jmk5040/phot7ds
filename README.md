@@ -232,10 +232,18 @@ restores the legacy behaviour (union coverage flag image, `..._cover` columns).
 **Cost.** Bitmasks are written to `mask_staging_dir` (default `/dev/shm`,
 ~70 MB per band on the 7DS grid, 1.6 GB for 23 bands) in parallel
 (`mask_workers`, default 8; ~3 s), fed to SE++ as `--flag-image-<band>` /
-`--flag-type-<band> or`, and deleted in a `finally` block. Stale directories
-left by a killed process (`phot7ds_masks_*_<pid>`) are swept at the start of
-the next run. On T08147 (23 bands, 16 threads) the extra flag images added
-about 2.5 min to a 6.5 min SE++ run; the photometry itself is unchanged.
+`--flag-type-<band> or`, and deleted right after SE++ returns. Stale
+directories left by a killed process (`phot7ds_masks_*_<pid>`) are swept at
+the start of the next run. On T08147 (23 bands, 16 threads) the extra flag
+images added about 2.5 min to a 6.5 min SE++ run; the photometry itself is
+unchanged.
+
+**The union coverage mask is no longer a run product.** It is still built
+(it places the empty apertures of the depth estimate and yields `MSKRATIO`),
+but in the same staging directory, and it disappears with it at the end of
+the run. Pass `save_coverage_mask=True` to keep it in `output_dir` as
+`{run_name}_mask.fits` (then `COVMASK` is written to the header), or
+`coverage_mask=` to supply your own.
 
 ### Canonical output schema (optional)
 
@@ -528,7 +536,7 @@ its primary header. Selected keys (all 8-char, no `HIERARCH`):
 | `PHOTHOST` | Hostname that produced the catalog               |
 | `DETLABEL` | `'DELVE'` or `'7DT'`                             |
 | `DETIMG`   | Detection image basename                         |
-| `COVMASK`  | Coverage mask basename                           |
+| `COVMASK`  | Coverage mask basename (only when supplied or `save_coverage_mask`) |
 | `BADPMASK` | Bad-pixel mask basename (if any)                 |
 | `REFCAT`   | Reference catalog basename                       |
 | `NSCIIMG`  | Number of measurement (science) images           |
