@@ -2,7 +2,7 @@
 
 Working memory for the `phot7ds` package and the 7DS/RIS scripts around it.
 Read this first when starting a new session. Version at time of writing:
-**phot7ds 0.6.0** (`phot7ds/__init__.py`, `pyproject.toml`).
+**phot7ds 0.7.0** (`phot7ds/__init__.py`, `pyproject.toml`).
 
 ---
 
@@ -65,7 +65,8 @@ phot7ds/
   calibration.py     # calibrate_zeropoints(), apply_spatial_zeropoint(); ZP per band×aperture
   depth.py           # depth estimation + ZP/depth header meta; WCS-based empty-aperture sky sigma
   images.py          # organize_images_by_filter(), build_coverage_mask() (shape-checked → (None,None))
-  sepp.py            # SE++ output parsing; aperture labels zero-padded ("05")
+  masks.py           # per-band bitmasks from py7DT count-map MEFs; MaskStaging (/dev/shm); v0.7.0
+  sepp.py            # SE++ command (FlagImage list) + output parsing; aperture labels zero-padded ("05")
   schema.py          # canonical catalog schema
   filters.py         # 7DS filter definitions / DEFAULT_BANDS
   presets.py         # detection-label SE++ tuning presets (PRESET_TUNING_FIELDS)
@@ -108,6 +109,24 @@ phot7ds/
 - `batch_run()` / `phot7ds_IMS.py` loop tiles; per-tile errors are caught so the
   batch continues. `phot7ds_IMS.py` builds a detection image (7DS white stack or
   DELVE) then calls `run_photometry`.
+- **Per-band mask flags (v0.7.0, `masks.py`):** for every measurement band a
+  `uint8` bitmask is built from the coadd (bit 128 = `==0 | ~isfinite`) plus,
+  if found, the py7DT count-map MEF `<coadd>_counts.fits` (bits 1–64 = py7DT
+  `MaskBit`: OUTLIER 1, BADPIX 2, STRAY 4, SATELLITE 8, SATURATED 16, HOT 32,
+  DEAD 64; a bit is set where the count `> 0`; `NUSED == 0` also → 128).
+  Staged in `/dev/shm/phot7ds_masks_<run>_<pid>/` (1.6 GB for 23 bands, ~3 s,
+  8 workers), passed as `--flag-image-<band> … --flag-type-<band> or`, removed
+  in `finally`; stale dirs of dead PIDs swept at start. Columns
+  `mask_flags_<band>` (OR over isophote) / `mask_npix_<band>`. The union
+  `isophotal_image_flags_cover` column is gone (bit 128 is per band); the
+  coverage mask is still built for depths only. Absent/partial/broken MEFs →
+  coverage-only bitmask (128 only) + warning + `status` in manifest
+  `band_masks`; never fatal. `count_masks=` accepts None (auto, follows
+  symlinks) / dir / `{band: path}` / list (matched by `FILTER`).
+  `per_band_masks=False` = legacy behaviour. SE++ facts learned: `[EXTNAME]`
+  selectors are silently ignored, tile-compressed HDUs unreadable, `[N]`
+  index works, `.fits.gz` works, requesting `ExternalFlags` with no flag
+  image is FATAL (now dropped automatically).
 
 ## 6. Detection images — `phot7ds.detection`
 
@@ -236,6 +255,9 @@ phot7ds/
   `MPLCONFIGDIR=/tmp/mpl python -m pytest tests/ -q`.
 - `build_coverage_mask` returns `(None, None)` (and logs) when science image
   shapes don't match the detection image, instead of raising.
+- Per-band bitmasks live in `/dev/shm` only while SE++ runs; if a run is
+  SIGKILLed, `phot7ds_masks_*_<pid>` may linger until the next run sweeps it
+  (`masks.sweep_stale_staging`). `mask_staging_dir=""` stages in the work dir.
 - Diagnostic figures off: `save_residual_plots=False` (run_photometry) /
   `plot_residuals=False`.
 
@@ -327,6 +349,34 @@ module tables, nor imports private names (`_select_tile_row`).
 Verified end-to-end on T16088 (32558 rows → 1642 matched galaxies, 30
 filters, coverage cut ≥18): full EAzY + FAST++ run, and the split path with
 photo-z on `aper05c` 7DS-only vs. SED fit on `autoc` + VHS/GALEX/WISE.
+
+## 9d. Recent changes (2026-09-11, v0.7.0)
+
+Per-band mask flags from py7DT count-map MEFs (request from the mask
+producer; design agreed: pipeline keeps MEF count maps, phot7ds converts to a
+bitmask internally). Details in §5 and README "Per-band mask flags".
+
+1. `masks.py`: `build_band_bitmask`, `resolve_count_masks`/`find_count_mask`,
+   `MaskStaging`, `sweep_stale_staging`, `rename_mask_columns`,
+   `any_band_nodata`. `sepp.FlagImage` + `build_sepp_command(flag_images=)`.
+   `PhotometryConfig`: `per_band_masks`, `count_mask_suffix`,
+   `mask_use_nused`, `mask_staging_dir`, `mask_workers`, `mask_flag_type`.
+   `run_photometry(count_masks=)`.
+2. Schema: `mask_flags_<band>`, `mask_npix_<band>` canonical;
+   `isophotal_image_flags_cover` pair removed (`schema.LEGACY_COVER_COLS`,
+   only with `per_band_masks=False`). VAC `_load_catalog` falls back to
+   "bit 128 in any band" when the cover column is absent.
+3. `build_coverage_mask` also flags non-finite pixels.
+4. Experiment record: `RIS/script/test/bitmask_experiment/` (`notes.txt`,
+   catalogs, `figures/`), prototype `RIS/script/test/bitmasktest.py`. T08147
+   coadds under `/lyman/data2/RIS/data/T08147/` were **NaN-filled copies**
+   (symlinks replaced; originals listed in `ORIGINAL_SYMLINKS.txt`) because
+   the delivered coadds still had NaN outside/inside the footprint (pipeline
+   version issue; producer was asked to interpolate).
+5. Per-band results (m525, 33 129 sources): flags==0 31 %, <4 48 %, NODATA
+   17 180, BADPIX 5 314, OUTLIER 1 549; inside every footprint 6 639 (union
+   flag had over-flagged 1.7k–12.2k per band). Partial-MEF run (only m525 MEF)
+   in `catalog_v070_partial/`.
 
 ## 10. Open / possible next steps
 

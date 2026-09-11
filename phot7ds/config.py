@@ -76,6 +76,22 @@ class PhotometryConfig:
     spatial_poly_degree: int = 2
     polygon_margin: float = 0.06
 
+    # --- Per-band mask flags (see phot7ds.masks) ---
+    # One uint8 bitmask per measurement band is built from the band's coadd
+    # (bit 128 = no data) plus, when present, its py7DT count-map MEF
+    # ``<coadd>_counts.fits`` (bits 1-64), and fed to SE++ as a flag image.
+    # Output columns: ``mask_flags_<band>``, ``mask_npix_<band>``. When off,
+    # the legacy union coverage mask is used instead (``isophotal_image_flags_cover``).
+    per_band_masks: bool = True
+    count_mask_suffix: str = "_counts.fits"
+    # Fold the MEF's NUSED == 0 pixels into bit 128 as well.
+    mask_use_nused: bool = True
+    # Where the bitmasks live during the SE++ run: a tmpfs keeps the extra
+    # I/O off disk (~70 MB per band on the 7DS grid). "" -> the work dir.
+    mask_staging_dir: str = "/dev/shm"
+    mask_workers: int = 8
+    mask_flag_type: str = "or"
+
     # --- Diagnostics ---
     save_residual_plots: bool = False
     plot_axiscolor: str = "elongation"

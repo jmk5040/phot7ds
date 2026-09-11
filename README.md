@@ -164,6 +164,79 @@ default name becomes `{output_dir}/{run_name}.fits`.
 
 See `help(phot7ds.run_photometry)` for all optional knobs.
 
+### Per-band mask flags from count-map MEFs (`mask_flags_<band>`)
+
+Since 0.7.0 every measurement band gets two integer columns,
+`mask_flags_<band>` and `mask_npix_<band>`, computed by SE++ over the
+source's detection isophote from a per-band **bitmask** that phot7ds builds
+on the fly. The input convention follows the 7DT image pipeline
+([py7DT](https://github.com/7DimensionalTelescope/pipeline)), which writes a
+multi-extension FITS **count map** next to each coadd:
+
+```
+<coadd>.fits                 science image (FILTER header = band)
+<coadd>_counts.fits          MEF of uint8 count planes on the same grid:
+    [NGEOM]     frames geometrically covering the pixel
+    [NUSED]     frames actually used in the coadd
+    [NBAD]      frames with a detector bad pixel        -> bit   2 BADPIX
+    [NSAT]      frames saturated                        -> bit  16 SATURATED
+    [NTRAIL]    frames crossed by a satellite trail     -> bit   8 SATELLITE
+    [NOUTLIER]  frames rejected by the outlier clipping -> bit   1 OUTLIER
+    [NHOT] [NDEAD] [NSTRAY]   reserved                  -> bits 32, 64, 4
+```
+
+phot7ds folds the MEF into one `uint8` bitmask per band: a bit is set where
+the corresponding count is `> 0` (i.e. *any* input frame was affected —
+severity is left to `mask_npix`). Bit values are py7DT's `MaskBit` enum, so
+milder conditions have lower bits and `mask_flags_<band> < 4` keeps sources
+touched only by an outlier or a bad pixel:
+
+| bit | name        | source                                                   |
+| --- | ----------- | -------------------------------------------------------- |
+| 1   | `OUTLIER`   | `NOUTLIER > 0`                                           |
+| 2   | `BADPIX`    | `NBAD > 0`                                               |
+| 4   | `STRAY`     | `NSTRAY > 0` (reserved)                                  |
+| 8   | `SATELLITE` | `NTRAIL > 0`                                             |
+| 16  | `SATURATED` | `NSAT > 0`                                               |
+| 32  | `HOT`       | `NHOT > 0` (reserved)                                    |
+| 64  | `DEAD`      | `NDEAD > 0` (reserved)                                   |
+| 128 | `NODATA`    | **no data in this band**: coadd pixel `== 0` or non-finite, or `NUSED == 0` |
+
+`mask_flags_<band>` is the OR of the bitmask over the isophote;
+`mask_npix_<band>` is the number of isophote pixels with any bit set. Bit 128
+is evaluated **per band** and replaces the pre-0.7.0 union column
+`isophotal_image_flags_cover` (a source outside the footprint of *one* band
+is no longer flagged in every band; use `phot7ds.any_band_nodata(cat)` for
+the old "any band" cut).
+
+**Locating the MEFs.** Nothing needs to be passed for the standard layout:
+
+```python
+run_photometry(..., science_images=coadds)            # auto-discover
+#   looks for <coadd stem>_counts.fits next to each coadd and, when the coadd
+#   is a symlink, next to its target (e.g. the pipeline's coadd directory)
+
+run_photometry(..., count_masks="/data/masks/T01234")  # a directory
+run_photometry(..., count_masks={"m525": "/data/T01234_m525_..._coadd_counts.fits"})
+run_photometry(..., count_masks=glob.glob("/data/*_counts.fits"))  # matched by FILTER header
+```
+
+**Absent or partial MEFs are fine.** A band without a usable MEF (missing
+file, unreadable, wrong shape, no known planes) still gets a bitmask that
+carries only bit 128, derived from the coadd itself; a warning is logged and
+the per-band status (`mef` / `coverage-only: <reason>`) is recorded in the
+manifest (`band_masks.bands.<band>.status`) and the header (`MSKnnn`,
+`NCNTMSK`). The run never stops because of a mask. `per_band_masks=False`
+restores the legacy behaviour (union coverage flag image, `..._cover` columns).
+
+**Cost.** Bitmasks are written to `mask_staging_dir` (default `/dev/shm`,
+~70 MB per band on the 7DS grid, 1.6 GB for 23 bands) in parallel
+(`mask_workers`, default 8; ~3 s), fed to SE++ as `--flag-image-<band>` /
+`--flag-type-<band> or`, and deleted in a `finally` block. Stale directories
+left by a killed process (`phot7ds_masks_*_<pid>`) are swept at the start of
+the next run. On T08147 (23 bands, 16 threads) the extra flag images added
+about 2.5 min to a 6.5 min SE++ run; the photometry itself is unchanged.
+
 ### Canonical output schema (optional)
 
 `standardize_catalog` defaults to **`False`**. When left at the default, the
@@ -317,7 +390,9 @@ same order:
 
 1. A fixed set of detection / geometry columns
    (`phot7ds.schema.CANONICAL_BASIC_COLS`): IDs, world/pixel centroids, error
-   ellipse, ellipse parameters, source flags, area, elongation, etc.
+   ellipse, ellipse parameters, source flags, area, elongation, etc., followed
+   by the per-band mask columns `mask_flags_{band}` and `mask_npix_{band}`
+   (see [Per-band mask flags](#per-band-mask-flags-from-count-map-mefs-mask_flags_band)).
 2. For each `aperture` x `band`:
    `{aperture}_{quantity}_{band}` where `quantity ∈ {flux, flux_err, mag,
    mag_err, flags}`.
@@ -459,6 +534,11 @@ its primary header. Selected keys (all 8-char, no `HIERARCH`):
 | `NSCIIMG`  | Number of measurement (science) images           |
 | `SCIMGNNN` | Per-image basename (`NNN` = zero-padded index)   |
 | `MSKRATIO` | Ratio of pixels masked in the coverage mask     |
+| `MB*`      | `mask_flags` bit values (`MBOUTLIE`=1 … `MBDEAD`=64, `MBNODATA`=128) |
+| `NBANDMSK` | Bands with `mask_flags`/`mask_npix` columns      |
+| `NCNTMSK`  | Bands whose bitmask included a count-map MEF     |
+| `MSKNNN`   | `<band>:<count MEF basename>` or `<band>:coverage-only` |
+| `MSKSTAGE` | Where the bitmasks were staged (`tmpfs`/`disk`)  |
 | `DETTHR`   | SE++ detection threshold (σ)                     |
 | `DETMINAR` | SE++ detection minimum area (pix)                |
 | `KRNMINR`  | SE++ auto-kron minimum radius (pix)              |
@@ -650,6 +730,12 @@ Pair it with `run_value_added(..., drop_empty_bands=True)`, which removes
 magnitude columns that are entirely empty before the filters are detected
 (`fluxes.drop_dead_bands` / `live_bands`): an unobserved band still has its
 column, filled with NaN, and detection works from column presence.
+
+Before either cut, sources outside the imaging footprint are dropped: with a
+pre-0.7.0 catalog via `cover_flag_column == 0`, with a 0.7.0+ catalog via
+bit 128 (`NODATA`) of the per-band `mask_flags_<band>` columns, rejecting a
+source flagged in **any** band (`phot7ds.any_band_nodata`) — the same
+selection the union column used to give.
 
 ### On-demand external catalogs (VizieR)
 

@@ -32,6 +32,32 @@ Where:
 
 The band is always the **last** token in the column name.
 
+## Mask columns (per band, since 0.7.0)
+
+```
+mask_flags_{band}   OR of the band's bitmask over the detection isophote (int)
+mask_npix_{band}    number of isophote pixels with any bit set (int)
+```
+
+| bit | name        | meaning                                              |
+|-----|-------------|------------------------------------------------------|
+| 1   | `OUTLIER`   | an input frame was rejected by the outlier clipping  |
+| 2   | `BADPIX`    | an input frame had a detector bad pixel              |
+| 4   | `STRAY`     | stray light (reserved by py7DT)                      |
+| 8   | `SATELLITE` | satellite trail                                      |
+| 16  | `SATURATED` | saturation                                           |
+| 32  | `HOT`       | hot pixel (reserved)                                 |
+| 64  | `DEAD`      | dead pixel (reserved)                                |
+| 128 | `NODATA`    | no data in **this band** (coadd `== 0`/NaN, `NUSED == 0`) |
+
+Bits 1–64 follow py7DT `MaskBit`; they are only populated when the band's
+count-map MEF (`<coadd>_counts.fits`) was available — otherwise only bit 128
+is set (the header card `MSKnnn` says `band:coverage-only`). Typical cuts:
+`mask_flags_m525 == 0` (pristine), `< 4` (at most outlier / bad pixel),
+`& 128 == 0` (inside the m525 footprint). The pre-0.7.0 union column
+`isophotal_image_flags_cover` no longer exists; `phot7ds.any_band_nodata(cat)`
+reproduces it.
+
 ## Calibrated columns
 
 After zero-point calibration, each measurement column carries a
@@ -93,6 +119,11 @@ broadbands (`G`/`R`/`I`/`Z`) and three digits for medium-bands
 | `NSCIIMG`  | Number of measurement images                     |
 | `SCIMGNNN` | Per-image basename (`NNN` = zero-padded index)   |
 | `MSKRATIO` | Ratio of pixels masked in the coverage mask     |
+| `MB*`      | `mask_flags` bit values (`MBOUTLIE` … `MBDEAD`, `MBNODATA`) |
+| `NBANDMSK` | Bands with `mask_flags`/`mask_npix` columns      |
+| `NCNTMSK`  | Bands whose bitmask included a count-map MEF     |
+| `MSKNNN`   | `<band>:<count MEF basename>` or `<band>:coverage-only` |
+| `MSKSTAGE` | Bitmask staging location (`tmpfs`/`disk`)        |
 | `DETTHR`   | SE++ detection threshold (σ)                     |
 | `DETMINAR` | SE++ detection minimum area (pix)                |
 | `KRNMINR`  | SE++ auto-kron minimum radius (pix)              |

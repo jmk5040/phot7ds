@@ -92,6 +92,17 @@ from .images import (
     extract_band_names_and_saturation,
     organize_images_by_filter,
 )
+from .masks import (
+    MASKBIT,
+    NODATA_BIT,
+    BandMaskInfo,
+    MaskStaging,
+    any_band_nodata,
+    build_band_bitmask,
+    find_count_mask,
+    rename_mask_columns,
+    resolve_count_masks,
+)
 from .pipeline import PhotometryResult, run_photometry
 from .presets import (
     DEFAULT_TUNING,
@@ -107,6 +118,7 @@ from .schema import (
 )
 from .sepp import (
     DEFAULT_OUTPUT_PROPERTIES,
+    FlagImage,
     build_sepp_command,
     generate_sepp_python_config,
     run_sepp,
@@ -114,7 +126,7 @@ from .sepp import (
 )
 from .tile_geometry import trim_to_tile_polygon
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 __all__ = [
     "__version__",
@@ -141,10 +153,21 @@ __all__ = [
     "build_coverage_mask",
     # SE++
     "DEFAULT_OUTPUT_PROPERTIES",
+    "FlagImage",
     "generate_sepp_python_config",
     "build_sepp_command",
     "run_sepp",
     "split_array_columns_to_per_filter",
+    # per-band mask flags
+    "MASKBIT",
+    "NODATA_BIT",
+    "BandMaskInfo",
+    "MaskStaging",
+    "any_band_nodata",
+    "build_band_bitmask",
+    "find_count_mask",
+    "rename_mask_columns",
+    "resolve_count_masks",
     # calibration
     "load_gaiaxp_reference",
     "apply_spatial_zeropoint",

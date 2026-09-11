@@ -15,6 +15,7 @@ from typing import Sequence
 import numpy as np
 from astropy.table import Table
 
+from ..masks import NODATA_BIT, any_band_nodata, mask_flag_columns
 from .catalog import assemble_value_added
 from .config import VACConfig
 from .crossmatch import build_galaxy_catalog
@@ -64,6 +65,17 @@ def _load_catalog(
         good = np.asarray(catalog[flag_col]) == 0
         log.info("Coverage cut: %d/%d rows kept.", int(good.sum()), len(catalog))
         catalog = catalog[good]
+    elif mask_flag_columns(catalog):
+        # phot7ds >= 0.7.0: the union coverage flag is replaced by bit 128
+        # (no data) in the per-band ``mask_flags_<band>`` columns. Dropping
+        # sources flagged in *any* band reproduces the legacy cut.
+        good = ~any_band_nodata(catalog)
+        log.info("Coverage cut (mask_flags bit %d, any band): %d/%d rows kept.",
+                 NODATA_BIT, int(good.sum()), len(catalog))
+        catalog = catalog[good]
+    else:
+        log.warning("No coverage flag column (%s or mask_flags_*) found; no coverage cut applied.",
+                    flag_col)
 
     if drop_empty_bands:
         catalog, _live = drop_dead_bands(catalog, apertures)

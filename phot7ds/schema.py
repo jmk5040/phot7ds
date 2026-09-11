@@ -56,9 +56,7 @@ kron_radius
 kron_flag
 source_flags
 isophotal_image_flags_badpix
-isophotal_image_flags_cover
 isophotal_image_flags_pixel_count_badpix
-isophotal_image_flags_pixel_count_cover
 ellipse_a
 ellipse_b
 ellipse_theta
@@ -69,6 +67,12 @@ area
 elongation
 ellipticity
 """.split()
+
+# Legacy (< 0.7.0) union coverage flag; kept only when per-band masks are off.
+LEGACY_COVER_COLS: list[str] = [
+    "isophotal_image_flags_cover",
+    "isophotal_image_flags_pixel_count_cover",
+]
 
 
 def _flux_fraction_suffix(f) -> str:
@@ -85,6 +89,7 @@ def build_canonical_schema(
     bands: Sequence[str],
     apertures: Sequence[str],
     flux_fractions: Sequence = (0.5, 0.9),
+    per_band_masks: bool = True,
 ) -> list[str]:
     """Return the canonical ordered list of column names.
 
@@ -96,12 +101,22 @@ def build_canonical_schema(
         Aperture names, e.g. ``['aper05', 'aper10', 'auto']``.
     flux_fractions
         Either fractions like 0.5/0.9 or SE++ suffixes ``'50'``/``'90'``.
+    per_band_masks
+        Include ``mask_flags_<band>`` / ``mask_npix_<band>`` (default). When
+        False the legacy ``isophotal_image_flags_cover`` pair is listed
+        instead.
     """
     bands = list(bands)
     apertures = list(apertures)
     suffixes = [_flux_fraction_suffix(f) for f in flux_fractions]
 
     cols = list(CANONICAL_BASIC_COLS)
+    if per_band_masks:
+        cols += [f"mask_flags_{band}" for band in bands]
+        cols += [f"mask_npix_{band}" for band in bands]
+    else:
+        idx = cols.index("isophotal_image_flags_pixel_count_badpix") + 1
+        cols[idx:idx] = LEGACY_COVER_COLS
     for aperture in apertures:
         for col_fmt in ("flux", "flux_err", "mag", "mag_err", "flags"):
             for band in bands:
@@ -128,6 +143,8 @@ def _infer_canonical_dtype(col_name: str) -> np.dtype:
     """Fallback dtype for columns absent from every reference catalog."""
     if col_name.endswith("_id") or col_name.endswith("_flags") or "_flags_" in col_name:
         return np.dtype(">i8")
+    if col_name.startswith("mask_npix_"):
+        return np.dtype(">i4")
     if col_name == "area":
         return np.dtype(">i8")
     if col_name == "kron_flag":
@@ -267,6 +284,7 @@ __all__ = [
     "PLACEHOLDER_TAG",
     "PLACEHOLDER_FILL",
     "CANONICAL_BASIC_COLS",
+    "LEGACY_COVER_COLS",
     "build_canonical_schema",
     "drop_seplusplus_duplicates",
     "standardize_catalog",

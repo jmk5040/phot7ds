@@ -4,6 +4,80 @@ All notable changes to `phot7ds`. Versions follow
 [semantic versioning](https://semver.org/) loosely: the minor number moves on
 new features or behaviour changes, the patch number on fixes.
 
+## v0.7.0 — 2026-09-11
+
+Per-band mask flags. The 7DT image pipeline (py7DT) now delivers a count-map
+MEF next to every coadd (`<coadd>_counts.fits`: `NBAD`, `NSAT`, `NTRAIL`,
+`NOUTLIER`, … as `uint8` frame counts). SE++ cannot consume those directly —
+the planes are tile-compressed, `[EXTNAME]` selectors are silently ignored,
+and six planes per band would mean hundreds of columns — so phot7ds folds
+each MEF into a single bitmask per band and hands that to SE++ as a flag
+image. The catalog gains two columns per band and loses the union coverage
+column. Validated on T08147 (23 bands): the bitmask path changes no
+photometric value, costs ~3 s of staging and ~2.5 min of extra SE++ time
+(+39 % on a 6.5 min run at 16 threads), and 31 % / 48 % of m525 sources come
+out with `mask_flags == 0` / `< 4`.
+
+### Added
+
+- **`phot7ds.masks`** — `build_band_bitmask()` (MEF + coadd → `uint8`
+  bitmask), `resolve_count_masks()` / `find_count_mask()` (discovery by the
+  `<coadd stem>_counts.fits` convention, following symlinks; or a directory,
+  a `{band: path}` mapping, or a list matched by the MEF `FILTER` header),
+  `MaskStaging` (parallel build into `/dev/shm`, `finally` cleanup, sweep of
+  stale `phot7ds_masks_*_<pid>` directories from killed runs, disk fallback),
+  `rename_mask_columns()`, `any_band_nodata()`.
+- **Bit convention** = py7DT `MaskBit`: 1 OUTLIER, 2 BADPIX, 4 STRAY,
+  8 SATELLITE, 16 SATURATED, 32 HOT, 64 DEAD, plus **128 NODATA** (phot7ds):
+  coadd pixel `== 0` or non-finite, or `NUSED == 0`. A defect bit is set where
+  the count is `> 0`; severity is left to `mask_npix`. Mild conditions have the
+  low bits so `mask_flags < 4` is a usable "clean enough" cut.
+- **New catalog columns** `mask_flags_<band>` (OR over the detection
+  isophote) and `mask_npix_<band>` (isophote pixels with any bit set), one
+  pair per measurement band, part of the canonical schema. Header cards
+  `MBOUTLIE … MBNODATA` (bit values), `NBANDMSK`, `NCNTMSK`, `MSKnnn`
+  (`<band>:<MEF>` or `<band>:coverage-only`), `MSKSTAGE`; manifest section
+  `band_masks` with per-band status, planes found/missing and pixel counts.
+- **`run_photometry(count_masks=...)`** and `PhotometryConfig` fields
+  `per_band_masks` (default `True`), `count_mask_suffix`, `mask_use_nused`,
+  `mask_staging_dir` (`/dev/shm`; `""` → work dir), `mask_workers`,
+  `mask_flag_type`.
+- **`sepp.FlagImage`** and `build_sepp_command(flag_images=[...])` for an
+  arbitrary set of `--flag-image-<label>` / `--flag-type-<label>` pairs;
+  labels are validated for uniqueness and SE++-safe characters.
+
+### Changed
+
+- **`isophotal_image_flags_cover` / `..._pixel_count_cover` are gone** from
+  the default output and the canonical schema. Bit 128 of `mask_flags_<band>`
+  is the per-band replacement: a source outside one band's footprint is no
+  longer flagged in all bands (on T08147 the union column over-flagged
+  1.7k–12.2k sources per band). The union coverage mask is still built for
+  the depth estimate; `per_band_masks=False` restores the legacy flag image
+  and columns. The VAC coverage cut (`vac.pipeline._load_catalog`) accepts
+  both: it uses `cover_flag_column` when present, otherwise rejects sources
+  with bit 128 in any band, which reproduces the old selection.
+- `build_coverage_mask` treats non-finite pixels as no-data, not only zeros.
+- `build_canonical_schema(..., per_band_masks=True)` appends the mask
+  columns after the basic block.
+
+### Fixed
+
+- `build_sepp_command` requested `ExternalFlags` even when no flag image was
+  given, which makes SE++ abort; the property is now dropped in that case.
+
+### Robustness (absent / partial MEFs)
+
+- A band with no MEF, an unreadable one, one on a different grid, or one
+  without any known plane gets a **coverage-only** bitmask (bit 128 from the
+  coadd alone), a warning, and `status = "coverage-only: <reason>"` in the
+  manifest and `MSKWHY` in the bitmask header. The run continues. Checked on
+  T08147 with a single real MEF (m525) and 22 bands without.
+- A coadd that is not on the detection grid is skipped for masking (no
+  `mask_flags` for that band; placeholder in the canonical schema) instead of
+  aborting; if no bitmask at all could be built the legacy coverage flag
+  image is used.
+
 ## v0.6.0 — 2026-08-29
 
 Promotes the machinery that had accumulated in the RIS production driver

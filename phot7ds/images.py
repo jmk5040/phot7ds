@@ -242,16 +242,23 @@ def build_coverage_mask(
         )
         return None, None
 
+    def _nodata(data: np.ndarray, out: np.ndarray) -> np.ndarray:
+        # Zero *or* non-finite: NaN/inf pixels are equally "no data" and
+        # would otherwise poison the photometry without raising a flag.
+        np.equal(data, 0, out=out)
+        out |= ~np.isfinite(data)
+        return out
+
     with fits.open(detection_image, memmap=True) as hdul_det:
         det_data = hdul_det[0].data
         maskdata = np.zeros(det_data.shape, dtype=np.uint16)
         zero_mask = np.zeros(det_data.shape, dtype=bool)
-        np.equal(det_data, 0, out=zero_mask)
+        _nodata(det_data, zero_mask)
         maskdata[zero_mask] = 1
 
     for sciimg in science_images:
         with fits.open(sciimg, memmap=True) as hdul_sci:
-            np.equal(hdul_sci[0].data, 0, out=zero_mask)
+            _nodata(hdul_sci[0].data, zero_mask)
         maskdata += zero_mask
 
     masked_ratio = float(np.count_nonzero(maskdata) / maskdata.size)

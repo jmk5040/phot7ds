@@ -17,12 +17,33 @@ import os
 import re
 import shlex
 import subprocess
+from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 import numpy as np
 from astropy.table import Table
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class FlagImage:
+    """One SE++ external flag image (``--flag-image-<label>``).
+
+    ``label`` becomes the column suffix (``isophotal_image_flags_<label>``,
+    ``isophotal_image_flags_pixel_count_<label>``). ``flag_type`` is one of
+    SE++'s ``or``, ``and``, ``min``, ``max``, ``most``; ``or`` is the right
+    choice for bitmasks. The image must be an integer FITS image on the
+    detection grid; tile-compressed extensions are not readable by SE++.
+    """
+
+    label: str
+    path: str
+    flag_type: str = "or"
+
+
+_FLAG_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_FLAG_TYPES = ("or", "and", "min", "max", "most")
 
 
 # The SE++ output properties this pipeline relies on. Order matters: extra
@@ -157,6 +178,7 @@ def build_sepp_command(
     *,
     coverage_mask: str | None = None,
     badpix_mask: str | None = None,
+    flag_images: Sequence[FlagImage] | None = None,
     detection_threshold: float = 1.5,
     detection_minimum_area: int = 9,
     auto_kron_min_radius: float = 3.5,
@@ -175,9 +197,40 @@ def build_sepp_command(
 ) -> str:
     """Build the ``sourcextractor++`` shell command as a single string.
 
+    External flag images come from three sources, all emitted as
+    ``--flag-image-<label> <path> --flag-type-<label> <type>``:
+
+    * ``coverage_mask`` -> label ``cover`` (legacy union coverage mask),
+    * ``badpix_mask``   -> label ``badpix`` (detection-image bad-pixel mask),
+    * ``flag_images``   -> arbitrary :class:`FlagImage` entries, e.g. one
+      per-band bitmask per measurement band (see :mod:`phot7ds.masks`).
+
+    Labels must be unique. When no flag image is given at all,
+    ``ExternalFlags`` is removed from the output properties, because SE++
+    aborts when that property is requested without a flag image.
+
     Returns the command; pass it to :func:`run_sepp` to execute.
     """
-    props = ",".join(p.strip() for p in output_properties if p.strip())
+    flags: list[FlagImage] = []
+    if coverage_mask:
+        flags.append(FlagImage("cover", str(coverage_mask), "or"))
+    if badpix_mask:
+        flags.append(FlagImage("badpix", str(badpix_mask), "or"))
+    flags.extend(flag_images or ())
+    seen: set[str] = set()
+    for fi in flags:
+        if not _FLAG_LABEL_RE.match(fi.label):
+            raise ValueError(f"Invalid flag-image label {fi.label!r}")
+        if fi.flag_type not in _FLAG_TYPES:
+            raise ValueError(f"Invalid flag-type {fi.flag_type!r} for {fi.label!r}; use one of {_FLAG_TYPES}")
+        if fi.label in seen:
+            raise ValueError(f"Duplicate flag-image label {fi.label!r}")
+        seen.add(fi.label)
+
+    prop_list = [p.strip() for p in output_properties if p.strip()]
+    if not flags and "ExternalFlags" in prop_list:
+        prop_list.remove("ExternalFlags")
+    props = ",".join(prop_list)
     fractions = ",".join(str(f) for f in flux_fractions)
 
     parts: list[str] = [
@@ -205,12 +258,9 @@ def build_sepp_command(
         "--output-catalog-format FITS",
         f"--log-level {log_level}",
     ]
-    if coverage_mask:
-        parts.append(f"--flag-image-cover {shlex.quote(coverage_mask)}")
-        parts.append("--flag-type-cover or")
-    if badpix_mask:
-        parts.append(f"--flag-image-badpix {shlex.quote(badpix_mask)}")
-        parts.append("--flag-type-badpix or")
+    for fi in flags:
+        parts.append(f"--flag-image-{fi.label} {shlex.quote(fi.path)}")
+        parts.append(f"--flag-type-{fi.label} {fi.flag_type}")
     if log_file:
         parts.append(f"--log-file {shlex.quote(log_file)}")
     return " ".join(parts)
@@ -446,6 +496,7 @@ def split_array_columns_to_per_filter(
 
 __all__ = [
     "DEFAULT_OUTPUT_PROPERTIES",
+    "FlagImage",
     "generate_sepp_python_config",
     "build_sepp_command",
     "run_sepp",

@@ -22,7 +22,7 @@ import socket
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from astropy.io import fits
 
@@ -41,6 +41,17 @@ from .images import (
     extract_band_names_and_saturation,
     organize_images_by_filter,
 )
+from .masks import (
+    MASKBIT,
+    NODATA_BIT,
+    BandMaskInfo,
+    MaskStaging,
+    mask_flags_column,
+    mask_npix_column,
+    maskbits_description,
+    rename_mask_columns,
+    resolve_count_masks,
+)
 from .presets import PRESET_TUNING_FIELDS, resolve_preset
 from .schema import (
     build_canonical_schema,
@@ -48,6 +59,7 @@ from .schema import (
     strip_nonfits_units,
 )
 from .sepp import (
+    FlagImage,
     build_sepp_command,
     generate_sepp_python_config,
     run_sepp,
@@ -92,6 +104,7 @@ _RUN_ONLY_KWARGS = {
     "catalog_name",
     "coverage_mask",
     "badpix_mask",
+    "count_masks",
     "tile_info",
     "run_name",
     "overwrite",
@@ -253,6 +266,8 @@ def _annotate_catalog_meta(
     mask_ratio: float | None,
     cfg: PhotometryConfig,
     run_name: str,
+    band_masks: Mapping[str, BandMaskInfo] | None = None,
+    mask_staging: str | None = None,
 ) -> None:
     """Inject high-value run-time metadata into ``meta`` (in place).
 
@@ -260,6 +275,10 @@ def _annotate_catalog_meta(
     They are kept short (<= 8 chars, no HIERARCH) so that legacy readers
     keep working. Values come from the same data we already write to the
     manifest JSON.
+
+    ``band_masks`` (per-band bitmask provenance, see :mod:`phot7ds.masks`)
+    adds ``MB<name>`` bit definitions, ``NBANDMSK``/``NCNTMSK`` counts and one
+    ``MSKnnn`` card per band (``<band>:<count MEF>`` or ``<band>:coverage-only``).
     """
     # Lazy version lookup avoids a circular import.
     try:
@@ -352,6 +371,24 @@ def _annotate_catalog_meta(
             "Ratio of pixels masked in coverage mask",
         )
 
+    if band_masks:
+        for name, bit in MASKBIT.items():
+            meta[f"MB{name[:6]}"] = (int(bit), f"mask_flags bit: {name}")
+        meta["MBNODATA"] = (int(NODATA_BIT), "mask_flags bit: no data in that band")
+        meta["NBANDMSK"] = (len(band_masks), "Bands with mask_flags/mask_npix columns")
+        meta["NCNTMSK"] = (
+            sum(1 for i in band_masks.values() if i.status == "mef"),
+            "Bands whose bitmask includes a count-map MEF",
+        )
+        if mask_staging:
+            meta["MSKSTAGE"] = (mask_staging, "Bitmask staging location during SE++")
+        for j, (band, info) in enumerate(band_masks.items()):
+            src = Path(info.count_mask).name if info.count_mask else "coverage-only"
+            value = f"{band}:{src}"[:68]
+            # An 80-char card leaves no room for a comment next to a long MEF name.
+            comment = f"mask source for band #{j:03d}" if len(value) <= 36 else ""
+            meta[f"MSK{j:03d}"] = (value, comment)
+
     # Selected tuning fields (short keys, FITS-safe).
     meta["DETTHR"] = (
         float(cfg.detection_threshold) if cfg.detection_threshold is not None else None,
@@ -399,6 +436,7 @@ def run_photometry(
     catalog_name: str | None = None,
     coverage_mask: str | None = None,
     badpix_mask: str | None = None,
+    count_masks: Mapping[str, str] | Sequence[str] | str | Path | None = None,
     tile_info: Any = None,
     run_name: str | None = None,
     overwrite: bool = False,
@@ -412,6 +450,13 @@ def run_photometry(
     apertures: Sequence[str] | None = None,
     detection_label: str | None = None,
     coverage_mask_max_fraction: float | None = None,
+    # --- Per-band mask flags (override config) ---
+    per_band_masks: bool | None = None,
+    count_mask_suffix: str | None = None,
+    mask_use_nused: bool | None = None,
+    mask_staging_dir: str | None = None,
+    mask_workers: int | None = None,
+    mask_flag_type: str | None = None,
     # --- SourceExtractor++ tuning (override config) ---
     detection_threshold: float | None = None,
     detection_minimum_area: int | None = None,
@@ -477,9 +522,20 @@ def run_photometry(
     coverage_mask
         Path to a precomputed coverage mask. If ``None``, one is built next
         to the output catalog by :func:`phot7ds.images.build_coverage_mask`.
+        It drives the depth estimate; it is only passed to SE++ as a flag
+        image (``isophotal_image_flags_cover``) when ``per_band_masks`` is
+        off, because the per-band bit 128 supersedes it.
     badpix_mask
         Optional bad-pixel mask FITS path passed to SE++ as
         ``--flag-image-badpix``.
+    count_masks
+        Per-band py7DT count-map MEFs (``<coadd>_counts.fits``) folded into
+        the ``mask_flags_<band>`` bitmasks. ``None`` (default) discovers them
+        next to each science image (following symlinks); a directory looks
+        there instead; a ``{band: path}`` mapping or a list of paths (matched
+        by their ``FILTER`` header) pins them explicitly. Bands without a
+        usable MEF still get a bitmask carrying only bit 128 (no data),
+        derived from the coadd. See :mod:`phot7ds.masks`.
     tile_info
         Optional single-row table (or dict-like) with ``ra1..ra4/dec1..dec4``.
         When provided, the Gaia XP reference is trimmed to the tile polygon
@@ -510,6 +566,14 @@ def run_photometry(
         ``config`` field.
     bands, apertures, detection_label, coverage_mask_max_fraction
         Schema / labelling overrides.
+    per_band_masks, count_mask_suffix, mask_use_nused, mask_staging_dir,
+    mask_workers, mask_flag_type
+        Per-band mask overrides (see :class:`PhotometryConfig`). With
+        ``per_band_masks`` (default ``True``) every measurement band gets
+        ``mask_flags_<band>`` (OR of the bitmask over the isophote) and
+        ``mask_npix_<band>`` (isophote pixels with a non-zero mask). The
+        bitmasks are staged in ``mask_staging_dir`` (default ``/dev/shm``)
+        for the SE++ run and removed afterwards.
     detection_threshold, detection_minimum_area, auto_kron_min_radius,
     auto_kron_factor, background_cell_size, smoothing_box_size,
     partition_threshold_count, partition_minimum_area,
@@ -621,30 +685,66 @@ def run_photometry(
         fixed_apertures=list(cfg.fixed_apertures_arcsec),
     )
 
-    cmd = build_sepp_command(
-        python_config_file=python_config_file,
-        sepp_config_file=cfg.sepp_config_file,
-        detection_image=detection_image,
-        detection_gain=det_gain,
-        detection_saturate=det_saturate,
-        catalog_path=str(raw_catalog_path),
-        coverage_mask=coverage_mask,
-        badpix_mask=badpix_mask,
-        detection_threshold=cfg.detection_threshold,
-        detection_minimum_area=cfg.detection_minimum_area,
-        auto_kron_min_radius=cfg.auto_kron_min_radius,
-        auto_kron_factor=cfg.auto_kron_factor,
-        background_cell_size=cfg.background_cell_size,
-        smoothing_box_size=cfg.smoothing_box_size,
-        partition_threshold_count=cfg.partition_threshold_count,
-        partition_minimum_area=cfg.partition_minimum_area,
-        partition_minimum_contrast=cfg.partition_minimum_contrast,
-        flux_fractions=cfg.flux_fractions,
-        clean_param=cfg.cleaning_minimum_area,
-        thread_count=cfg.thread_count,
-        log_file=str(log_file),
-    )
-    run_sepp(cmd, check=True)
+    # Per-band bitmasks (bits 1-64 from the count-map MEF, 128 = no data in
+    # that band). They replace the union coverage flag image for SE++; the
+    # coverage mask itself is kept for the depth estimate.
+    band_masks: dict[str, BandMaskInfo] = {}
+    flag_images: list[FlagImage] = []
+    sepp_coverage_mask: str | None = coverage_mask
+    staging: MaskStaging | None = None
+    if cfg.per_band_masks:
+        det_shape = tuple(int(det_hdr[f"NAXIS{i}"]) for i in range(int(det_hdr.get("NAXIS", 2)), 0, -1))
+        band_to_image = dict(zip(band_names, sciimgs))
+        band_to_mef = resolve_count_masks(
+            sciimgs, band_names, count_masks, suffix=cfg.count_mask_suffix,
+        )
+        staging = MaskStaging(
+            run_name,
+            staging_dir=cfg.mask_staging_dir or None,
+            fallback_dir=work_dir,
+            workers=cfg.mask_workers,
+        )
+        band_masks = staging.stage(
+            band_to_image, band_to_mef, det_shape, use_nused=cfg.mask_use_nused,
+        )
+        flag_images = [
+            FlagImage(band, info.bitmask, cfg.mask_flag_type)
+            for band, info in band_masks.items()
+        ]
+        if flag_images:
+            sepp_coverage_mask = None
+        else:
+            log.warning("No per-band bitmask could be built; falling back to the coverage flag image.")
+
+    try:
+        cmd = build_sepp_command(
+            python_config_file=python_config_file,
+            sepp_config_file=cfg.sepp_config_file,
+            detection_image=detection_image,
+            detection_gain=det_gain,
+            detection_saturate=det_saturate,
+            catalog_path=str(raw_catalog_path),
+            coverage_mask=sepp_coverage_mask,
+            badpix_mask=badpix_mask,
+            flag_images=flag_images,
+            detection_threshold=cfg.detection_threshold,
+            detection_minimum_area=cfg.detection_minimum_area,
+            auto_kron_min_radius=cfg.auto_kron_min_radius,
+            auto_kron_factor=cfg.auto_kron_factor,
+            background_cell_size=cfg.background_cell_size,
+            smoothing_box_size=cfg.smoothing_box_size,
+            partition_threshold_count=cfg.partition_threshold_count,
+            partition_minimum_area=cfg.partition_minimum_area,
+            partition_minimum_contrast=cfg.partition_minimum_contrast,
+            flux_fractions=cfg.flux_fractions,
+            clean_param=cfg.cleaning_minimum_area,
+            thread_count=cfg.thread_count,
+            log_file=str(log_file),
+        )
+        run_sepp(cmd, check=True)
+    finally:
+        if staging is not None:
+            staging.cleanup()
 
     cat = split_array_columns_to_per_filter(
         str(raw_catalog_path),
@@ -655,6 +755,10 @@ def run_photometry(
     )
     if cat is None:
         raise RuntimeError("SE++ catalog could not be loaded for post-processing")
+    if band_masks:
+        renamed = rename_mask_columns(cat, list(band_masks))
+        log.info("Per-band mask columns: %d (%s ...); bits %s", len(renamed),
+                 ", ".join(list(renamed.values())[:2]), maskbits_description())
 
     ref_cat = load_gaiaxp_reference(
         reference_catalog,
@@ -735,12 +839,15 @@ def run_photometry(
         mask_ratio=mask_ratio,
         cfg=cfg,
         run_name=run_name,
+        band_masks=band_masks or None,
+        mask_staging=staging.location if staging is not None else None,
     )
     if standardize_catalog:
         schema = build_canonical_schema(
             bands=cfg.bands,
             apertures=cfg.apertures,
             flux_fractions=cfg.flux_fractions,
+            per_band_masks=bool(band_masks),
         )
         cat = apply_standard_catalog(cat, schema)
         log.info(
@@ -757,12 +864,21 @@ def run_photometry(
         "detection_image": str(detection_image),
         "detection_label": cfg.detection_label,
         "coverage_mask": str(coverage_mask) if coverage_mask else None,
+        "coverage_mask_used_by_sepp": bool(sepp_coverage_mask),
         "mask_ratio": mask_ratio,
         "badpix_mask": str(badpix_mask) if badpix_mask else None,
         "reference_catalog": str(reference_catalog),
         "science_images": list(sciimgs),
         "config": cfg.to_dict(),
     }
+    if band_masks:
+        manifest["band_masks"] = {
+            "bits": {name: int(bit) for name, bit in MASKBIT.items()} | {"NODATA": int(NODATA_BIT)},
+            "columns": [mask_flags_column(b) for b in band_masks] + [mask_npix_column(b) for b in band_masks],
+            "staging": staging.location if staging is not None else None,
+            "staging_seconds": round(staging.seconds, 2) if staging is not None and staging.seconds else None,
+            "bands": {band: info.to_dict() for band, info in band_masks.items()},
+        }
     if depth_results:
         manifest["depths"] = {
             f"{aper}__{band}": entry
