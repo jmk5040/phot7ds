@@ -190,6 +190,7 @@ def build_sepp_command(
     partition_minimum_contrast: float = 1e-5,
     flux_fractions: Sequence[float] = (0.5, 0.9),
     clean_param: int = 8,
+    segmentation_filter: str | None = None,
     thread_count: int = 4,
     output_properties: Sequence[str] = DEFAULT_OUTPUT_PROPERTIES,
     log_file: str | None = None,
@@ -258,6 +259,8 @@ def build_sepp_command(
         "--output-catalog-format FITS",
         f"--log-level {log_level}",
     ]
+    if segmentation_filter:
+        parts.append(f"--segmentation-filter {shlex.quote(segmentation_filter)}")
     for fi in flags:
         parts.append(f"--flag-image-{fi.label} {shlex.quote(fi.path)}")
         parts.append(f"--flag-type-{fi.label} {fi.flag_type}")

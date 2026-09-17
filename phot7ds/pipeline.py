@@ -468,6 +468,7 @@ def run_photometry(
     partition_minimum_area: int | None = None,
     partition_minimum_contrast: float | None = None,
     cleaning_minimum_area: int | None = None,
+    segmentation_filter: str | None = None,
     flux_fractions: Sequence[float] | None = None,
     fixed_apertures_arcsec: Sequence[float] | None = None,
     pixscale_arcsec: float | None = None,
@@ -581,8 +582,8 @@ def run_photometry(
     detection_threshold, detection_minimum_area, auto_kron_min_radius,
     auto_kron_factor, background_cell_size, smoothing_box_size,
     partition_threshold_count, partition_minimum_area,
-    partition_minimum_contrast, cleaning_minimum_area, flux_fractions,
-    fixed_apertures_arcsec, pixscale_arcsec, thread_count
+    partition_minimum_contrast, cleaning_minimum_area, segmentation_filter,
+    flux_fractions, fixed_apertures_arcsec, pixscale_arcsec, thread_count
         SourceExtractor++ tuning overrides.
     match_radius_arcsec, mag_range, spatial_poly_degree, polygon_margin
         Calibration overrides.
@@ -750,6 +751,7 @@ def run_photometry(
                 partition_minimum_contrast=cfg.partition_minimum_contrast,
                 flux_fractions=cfg.flux_fractions,
                 clean_param=cfg.cleaning_minimum_area,
+                segmentation_filter=cfg.segmentation_filter,
                 thread_count=cfg.thread_count,
                 log_file=str(log_file),
             )

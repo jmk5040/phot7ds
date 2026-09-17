@@ -4,6 +4,15 @@ All notable changes to `phot7ds`. Versions follow
 [semantic versioning](https://semver.org/) loosely: the minor number moves on
 new features or behaviour changes, the patch number on fixes.
 
+## v0.7.1 - 2026-09-17
+
+### Added
+
+- **`segmentation_filter`** (`PhotometryConfig`, `run_photometry`,
+  `build_sepp_command`) — path of an SE++ `.conv` detection kernel, passed as
+  `--segmentation-filter`. Empty (default) leaves the kernel to the
+  `--config-file`, i.e. SE++'s built-in 3x3 unless that file names one.
+
 ## v0.7.0 — 2026-09-11
 
 Per-band mask flags. The 7DT image pipeline (py7DT) now delivers a count-map
