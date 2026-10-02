@@ -65,6 +65,8 @@ class PhotometryConfig:
     smoothing_box_size: int = 3
     partition_minimum_area: int = 9
     cleaning_minimum_area: int = 8
+    # SE++ detection kernel (.conv) passed as --segmentation-filter; "" leaves it to the --config-file.
+    segmentation_filter: str = ""
     flux_fractions: tuple[float, ...] = (0.5, 0.9)
     fixed_apertures_arcsec: tuple[float, ...] = (5.0, 10.0)
     pixscale_arcsec: float = 0.505

@@ -50,6 +50,15 @@ every catalog differ from earlier versions — hence the minor bump, so that
 - The detection image's own `GAIN` / `SATURATE` still go to
   `--detection-image-gain` / `--detection-image-saturation`.
 
+## v0.7.1 - 2026-09-17
+
+### Added
+
+- **`segmentation_filter`** (`PhotometryConfig`, `run_photometry`,
+  `build_sepp_command`) — path of an SE++ `.conv` detection kernel, passed as
+  `--segmentation-filter`. Empty (default) leaves the kernel to the
+  `--config-file`, i.e. SE++'s built-in 3x3 unless that file names one.
+
 ## v0.7.0 — 2026-09-11
 
 Per-band mask flags. The 7DT image pipeline (py7DT) now delivers a count-map
