@@ -4,6 +4,52 @@ All notable changes to `phot7ds`. Versions follow
 [semantic versioning](https://semver.org/) loosely: the minor number moves on
 new features or behaviour changes, the patch number on fixes.
 
+## v0.8.0 — 2026-10-02
+
+SE++ now measures every image with **its own gain and saturation level**.
+Before, the measurement images got the detection image's `GAIN` (a SWarp
+"maximum equivalent gain", 28039 e-/ADU on T08147) and a saturation read
+from `SATLV`, which 7DS coadds do not carry, so every band fell back to
+10000 ADU. Fluxes are unchanged, but flux errors and the SATURATED flag of
+every catalog differ from earlier versions — hence the minor bump, so that
+0.8.0 catalogs (`PHOTVER`) can be told apart from re-runs of older ones.
+
+### Fixed
+
+- **Measurement gain** is read per image from `EGAIN` (the effective gain
+  of the stack), falling back to `GAIN`, then to 0 with a warning
+  (`images.extract_gain_values`, `images.GAIN_KEYWORDS`). The gain that
+  went in before was so large that the Poisson term of the flux error was
+  dropped: on T08147 the aperture flux errors grow by a median ×1.79 in `g`
+  (EGAIN 44.8) and ×1.12 in `m875` (EGAIN 0.36), up to ×18–25 for bright
+  sources, and the added variance equals `flux / EGAIN` to 0.2 %.
+- **Measurement saturation** is read from `SATURATE`, falling back to
+  `SATLV` (single-frame 7DT key), then to `default_saturation` with a
+  warning (`images.SATURATION_KEYWORDS`). The coadd levels span 776 ADU
+  (`g`) to 94 682 ADU (`m875`): on T08147 the SATURATED flag (bit 4 of
+  `aper_*_flags` / `auto_flags`) now marks 71 `g` sources it missed, and no
+  longer marks 14 `m875` sources it set wrongly.
+- `sepp.generate_sepp_python_config(gain=...)` takes one gain per image (a
+  scalar still applies to all) and sets `img.gain` / `img.saturation` per
+  image; mismatched list lengths raise.
+
+### Added
+
+- Header cards `EGAINnnn` / `SATURnnn` (paired with `SCIMGnnn`) and manifest
+  entries `measurement_images` (band, image, gain, saturation),
+  `detection_gain`, `detection_saturation`; the per-band values are logged.
+- **`VACConfig.use_regalade_zspec`** (default `False`) and
+  `regalade_spec_codes` (default `(4, 5, 6, 7, 8, 0, 2)`): galaxies whose
+  REGALADE `r_DistInput` is a spectroscopic code get a `z_spec` column in
+  the flux catalog (others `-1`), so FAST++ fits them at that redshift; EAzY
+  only reports it. With the option off no `z_spec` column is written.
+  `flux_info["n_zspec"]` counts them.
+
+### Unchanged
+
+- The detection image's own `GAIN` / `SATURATE` still go to
+  `--detection-image-gain` / `--detection-image-saturation`.
+
 ## v0.7.0 — 2026-09-11
 
 Per-band mask flags. The 7DT image pipeline (py7DT) now delivers a count-map

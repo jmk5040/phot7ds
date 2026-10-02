@@ -336,6 +336,82 @@ def test_annotate_catalog_meta_writes_manifest_keys() -> None:
     assert meta["DETTHR"][0] == 10.0
 
 
+def _write_header_only(path, **cards) -> str:
+    from astropy.io import fits
+
+    hdu = fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.float32))
+    for key, value in cards.items():
+        hdu.header[key] = value
+    hdu.writeto(str(path), overwrite=True)
+    return str(path)
+
+
+def test_measurement_gain_and_saturation_come_from_each_image(tmp_path) -> None:
+    """EGAIN/SATURATE of each measurement image, not SATLV or the detection GAIN."""
+    from phot7ds.images import extract_band_names_and_saturation, extract_gain_values
+
+    coadd = _write_header_only(tmp_path / "g.fits", FILTER="g", EGAIN=44.8, SATURATE=775.9)
+    single = _write_header_only(tmp_path / "r.fits", FILTER="r", GAIN=1.3, SATLV=60000.0)
+    bare = _write_header_only(tmp_path / "i.fits", FILTER="i")
+    both = _write_header_only(
+        tmp_path / "z.fits", FILTER="z", EGAIN=7.6, GAIN=0.8, SATURATE=4612.0, SATLV=60000.0,
+    )
+    imgs = [coadd, single, bare, both]
+
+    bands, sats = extract_band_names_and_saturation(imgs, default_saturation=10000)
+    gains = extract_gain_values(imgs)
+    assert bands == ["g", "r", "i", "z"]
+    assert sats == [775.9, 60000.0, 10000.0, 4612.0]
+    assert gains == [44.8, 1.3, 0.0, 7.6]
+
+
+def test_sepp_python_config_sets_per_image_gain_and_saturation(tmp_path) -> None:
+    from phot7ds.sepp import generate_sepp_python_config
+
+    cfg = tmp_path / "sepp.py"
+    generate_sepp_python_config(
+        config_file=str(cfg),
+        sciimgs=["/x/g.fits", "/x/r.fits"],
+        band_names=["g", "r"],
+        saturation_values=[775.9451869169503, 4611.99538016619],
+        gain=[44.80280418295595, 7.6062614417710055],
+        aper_radius_pix=[2.0],
+        fixed_apertures=[5.0],
+    )
+    text = cfg.read_text()
+    assert "load_fits_images(measurement_image_paths)\n" in text
+    assert "gain=" not in text
+    ns: dict = {}
+    exec(text[text.index("gain_values = ["):text.index("for idx, img")], ns)
+    assert ns["gain_values"] == [44.80280418295595, 7.6062614417710055]
+    assert ns["saturation_values"] == [775.9451869169503, 4611.99538016619]
+    assert "img.gain = gain_values[idx]" in text
+    assert "img.saturation = saturation_values[idx]" in text
+
+    with pytest.raises(ValueError):
+        generate_sepp_python_config(
+            config_file=str(cfg), sciimgs=["/x/g.fits", "/x/r.fits"], band_names=["g", "r"],
+            saturation_values=[1.0, 2.0], gain=[1.0], aperture_photometry=False,
+        )
+
+
+def test_annotate_catalog_meta_records_measurement_gain() -> None:
+    from phot7ds.config import PhotometryConfig
+    from phot7ds.pipeline import _annotate_catalog_meta
+
+    meta: dict = {}
+    _annotate_catalog_meta(
+        meta,
+        detection_image="/p/det.fits", coverage_mask=None, badpix_mask=None,
+        reference_catalog="/p/ref.csv", science_images=["/x/a.fits", "/x/b.fits"],
+        detection_label="7DT", mask_ratio=None, cfg=PhotometryConfig(), run_name="r",
+        gain_values=[44.8, 7.6], saturation_values=[775.9, 4612.0],
+    )
+    assert meta["EGAIN000"][0] == 44.8
+    assert meta["EGAIN001"][0] == 7.6
+    assert meta["SATUR001"][0] == 4612.0
+
+
 def test_config_io_required_files_raise(tmp_path) -> None:
     """``require_*`` helpers raise informative errors when files are missing."""
     from phot7ds import require_gaiaxp_reference, require_tile_table

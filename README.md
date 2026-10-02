@@ -541,6 +541,8 @@ its primary header. Selected keys (all 8-char, no `HIERARCH`):
 | `REFCAT`   | Reference catalog basename                       |
 | `NSCIIMG`  | Number of measurement (science) images           |
 | `SCIMGNNN` | Per-image basename (`NNN` = zero-padded index)   |
+| `EGAINNNN` | Gain SE++ used for image `NNN` [e-/ADU] (its `EGAIN`, else `GAIN`) |
+| `SATURNNN` | Saturation SE++ used for image `NNN` (its `SATURATE`, else `SATLV`) |
 | `MSKRATIO` | Ratio of pixels masked in the coverage mask     |
 | `MB*`      | `mask_flags` bit values (`MBOUTLIE`=1 … `MBDEAD`=64, `MBNODATA`=128) |
 | `NBANDMSK` | Bands with `mask_flags`/`mask_npix` columns      |
@@ -744,6 +746,17 @@ pre-0.7.0 catalog via `cover_flag_column == 0`, with a 0.7.0+ catalog via
 bit 128 (`NODATA`) of the per-band `mask_flags_<band>` columns, rejecting a
 source flagged in **any** band (`phot7ds.any_band_nodata`) — the same
 selection the union column used to give.
+
+### Spectroscopic redshifts from REGALADE
+
+`VACConfig(use_regalade_zspec=True)` (default `False`) adds a `z_spec`
+column to the flux catalog for galaxies whose REGALADE distance source
+`r_DistInput` is one of `regalade_spec_codes` (default `(4, 5, 6, 7, 8, 0, 2)`)
+and whose `regalade_z` is finite and positive; every other galaxy gets `-1`.
+FAST++ then fits those galaxies at the spectroscopic redshift (a `z_spec`
+column in the `.cat` takes precedence over the `.zout` photo-z), while EAzY
+only reports it next to the still-free photo-z. With the option off the
+column is not written, so the inputs are those of earlier versions.
 
 ### On-demand external catalogs (VizieR)
 

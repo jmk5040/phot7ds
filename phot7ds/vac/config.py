@@ -167,6 +167,13 @@ class VACConfig:
     regalade_dec_key: str = "DEJ2000"
     regalade_name_key: str = "Name"
     regalade_mag_key: str = "rmag"
+    # REGALADE distance-source codes (``r_DistInput``) treated as
+    # spectroscopic. When ``use_regalade_zspec`` is on, those galaxies get a
+    # ``z_spec`` column in the flux catalog (see fluxes.build_flux_catalog):
+    # FAST++ then fits them at the spectroscopic redshift, and EAzY reports
+    # it next to the (still free) photo-z.
+    use_regalade_zspec: bool = False
+    regalade_spec_codes: tuple[int, ...] = (4, 5, 6, 7, 8, 0, 2)
     # ``None`` follows vhs_mag_set (see VHS_STAGING and the vhs_staging
     # property); set them to pin an explicit location.
     vhs_subdir: str | None = None

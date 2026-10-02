@@ -2,7 +2,7 @@
 
 Working memory for the `phot7ds` package and the 7DS/RIS scripts around it.
 Read this first when starting a new session. Version at time of writing:
-**phot7ds 0.7.0** (`phot7ds/__init__.py`, `pyproject.toml`).
+**phot7ds 0.8.0** (`phot7ds/__init__.py`, `pyproject.toml`).
 
 ---
 
@@ -379,6 +379,29 @@ bitmask internally). Details in §5 and README "Per-band mask flags".
    17 180, BADPIX 5 314, OUTLIER 1 549; inside every footprint 6 639 (union
    flag had over-flagged 1.7k–12.2k per band). Partial-MEF run (only m525 MEF)
    in `catalog_v070_partial/`.
+
+## 9e. Recent changes (2026-10-02, v0.8.0)
+
+1. **SE++ measurement gain / saturation fix.** Measurement images used the
+   detection image's `GAIN` (SWarp "maximum equivalent gain", 28039 on
+   T08147) and `SATLV` (absent in 7DS coadds → 10000 for every band). Now
+   per image: gain = `EGAIN` → `GAIN` → 0 (`images.extract_gain_values`),
+   saturation = `SATURATE` → `SATLV` → default
+   (`extract_band_names_and_saturation`); `generate_sepp_python_config`
+   sets `img.gain` / `img.saturation` per image. 7DS coadd headers have
+   `EGAIN` + `SATURATE` only (no `GAIN`, no `SATLV`). Header `EGAINnnn` /
+   `SATURnnn`, manifest `measurement_images`. A/B on T08147 (g, m875):
+   fluxes identical, Δσ² = flux/EGAIN, SATURATED flag g 0→71, m875 14→0.
+   Detection-image gain/saturation unchanged (still detection `GAIN` /
+   `SATURATE`). The same fix was applied to the standalone
+   `RIS/script/Utils_7DT.py` (not in git; backup
+   `legacy/Utils_7DT_261002.py`); `RIS_catalog_sepp.py` still passes the
+   detection gain as a scalar.
+2. **REGALADE z_spec** (`VACConfig.use_regalade_zspec`, default `False`;
+   `regalade_spec_codes`): spectroscopic-code galaxies get `z_spec` in the
+   flux `.cat` (others −1); FAST++ fits at z_spec, EAzY only reports it.
+   Off → no `z_spec` column. `RIS_vac.py` turns it on by default
+   (`USE_ZSPEC = True`, `--no-zspec` to disable).
 
 ## 10. Open / possible next steps
 

@@ -317,6 +317,30 @@ def build_flux_catalog(
 
     fluxtbl = Table()
     fluxtbl["#id"] = np.arange(1, len(magtbl) + 1)
+    # Spectroscopic redshifts from REGALADE. A ``z_spec`` column in
+    # [CATALOG].cat takes precedence over the .zout photo-z in FAST++ (even
+    # with FORCE_ZPHOT=1), so galaxies whose REGALADE distance comes from a
+    # spectroscopic catalog are fitted at that redshift; EAzY only reports
+    # the value (FIX_ZSPEC stays 'n', the photo-z itself is unaffected).
+    # -1 marks "no z_spec" for both codes. With the option off the column is
+    # not written at all.
+    n_zspec = 0
+    if getattr(cfg, "use_regalade_zspec", False):
+        zspec = np.full(len(magtbl), -1.0)
+        if ("regalade_z" in magtbl.colnames
+                and "regalade_r_DistInput" in magtbl.colnames):
+            zval = np.asarray(magtbl["regalade_z"], dtype=float)
+            src = np.asarray(magtbl["regalade_r_DistInput"])
+            spec = (np.isin(src, list(cfg.regalade_spec_codes))
+                    & np.isfinite(zval) & (zval > 0))
+            zspec[spec] = zval[spec]
+            n_zspec = int(spec.sum())
+            log.info("z_spec from REGALADE (r_DistInput in %s): %d/%d galaxies",
+                     list(cfg.regalade_spec_codes), n_zspec, len(magtbl))
+        else:
+            log.warning("use_regalade_zspec is on but regalade_z / "
+                        "regalade_r_DistInput are missing; z_spec = -1 for all.")
+        fluxtbl["z_spec"] = zspec
 
     for band in filters:
         if band not in lambda_ext:
@@ -358,6 +382,7 @@ def build_flux_catalog(
         "ebv_center": (centra, centdec),
         "n_input": len(magtbl),
         "n_pass": len(clean_tbl),
+        "n_zspec": n_zspec,
         "min_filter_fraction": cfg.min_filter_fraction,
         "min_7ds_band_fraction": cfg.min_7ds_band_fraction,
         "n_filters_required": required_filter_count(fluxtbl, cfg)[0],

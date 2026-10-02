@@ -39,6 +39,7 @@ from .filters import DEFAULT_BANDS, get_filter_definitions
 from .images import (
     build_coverage_mask,
     extract_band_names_and_saturation,
+    extract_gain_values,
     organize_images_by_filter,
 )
 from .masks import (
@@ -268,6 +269,8 @@ def _annotate_catalog_meta(
     run_name: str,
     band_masks: Mapping[str, BandMaskInfo] | None = None,
     mask_staging: str | None = None,
+    gain_values: Sequence[float] | None = None,
+    saturation_values: Sequence[float] | None = None,
 ) -> None:
     """Inject high-value run-time metadata into ``meta`` (in place).
 
@@ -275,6 +278,10 @@ def _annotate_catalog_meta(
     They are kept short (<= 8 chars, no HIERARCH) so that legacy readers
     keep working. Values come from the same data we already write to the
     manifest JSON.
+
+    ``gain_values`` / ``saturation_values`` (1:1 with ``science_images``)
+    add ``EGAINnnn`` / ``SATURnnn``: the gain and saturation SE++ used for
+    measurement image ``SCIMGnnn``.
 
     ``band_masks`` (per-band bitmask provenance, see :mod:`phot7ds.masks`)
     adds ``MB<name>`` bit definitions, ``NBANDMSK``/``NCNTMSK`` counts and one
@@ -328,6 +335,14 @@ def _annotate_catalog_meta(
         meta[f"SCIMG{j:03d}"] = (
             str(Path(img).name), f"Science image #{j:03d} basename"
         )
+        if gain_values is not None and j < len(gain_values):
+            meta[f"EGAIN{j:03d}"] = (
+                float(gain_values[j]), f"SE++ gain of science image #{j:03d} [e-/ADU]"
+            )
+        if saturation_values is not None and j < len(saturation_values):
+            meta[f"SATUR{j:03d}"] = (
+                float(saturation_values[j]), f"SE++ saturation of science image #{j:03d}"
+            )
         try:
             hdr_j = fits.getheader(img)
         except Exception:
@@ -681,7 +696,15 @@ def run_photometry(
                 mask_ratio = None
 
         band_names, saturation_values = extract_band_names_and_saturation(sciimgs)
+        gain_values = extract_gain_values(sciimgs)
         log.info("Per-image bands: %s", band_names)
+        log.info(
+            "Measurement image gain [e-/ADU] / saturation [ADU]:\n%s",
+            "\n".join(
+                f"  {band:<8s} {gain:10.4f} {sat:12.2f}"
+                for band, gain, sat in zip(band_names, gain_values, saturation_values)
+            ),
+        )
 
         det_hdr = fits.getheader(detection_image)
         det_gain = float(det_hdr.get("GAIN", 1.0))
@@ -698,7 +721,7 @@ def run_photometry(
             sciimgs=sciimgs,
             band_names=band_names,
             saturation_values=saturation_values,
-            gain=det_gain,
+            gain=gain_values,
             aperture_photometry=True,
             aper_radius_pix=aper_radius_pix,
             fixed_apertures=list(cfg.fixed_apertures_arcsec),
@@ -854,6 +877,8 @@ def run_photometry(
             run_name=run_name,
             band_masks=band_masks or None,
             mask_staging=staging.location,
+            gain_values=gain_values,
+            saturation_values=saturation_values,
         )
         if standardize_catalog:
             schema = build_canonical_schema(
@@ -883,6 +908,14 @@ def run_photometry(
             "badpix_mask": str(badpix_mask) if badpix_mask else None,
             "reference_catalog": str(reference_catalog),
             "science_images": list(sciimgs),
+            "measurement_images": [
+                {"band": band, "image": str(img), "gain": gain, "saturation": sat}
+                for band, img, gain, sat in zip(
+                    band_names, sciimgs, gain_values, saturation_values
+                )
+            ],
+            "detection_gain": det_gain,
+            "detection_saturation": det_saturate,
             "config": cfg.to_dict(),
         }
         if band_masks:

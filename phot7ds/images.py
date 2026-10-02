@@ -123,8 +123,35 @@ def organize_images_by_filter(
     raise ValueError(f"output_form must be 'dict' or 'list', got {output_form!r}")
 
 
+#: Header keywords tried in order for a measurement image's saturation level
+#: (7DS coadds carry ``SATURATE``; ``SATLV`` is the single-frame 7DT key).
+SATURATION_KEYWORDS: tuple[str, ...] = ("SATURATE", "SATLV")
+#: Header keywords tried in order for a measurement image's gain [e-/ADU].
+#: 7DS coadds carry the effective gain of the stack in ``EGAIN`` and no
+#: ``GAIN``.
+GAIN_KEYWORDS: tuple[str, ...] = ("EGAIN", "GAIN")
+
+
+def _first_header_value(
+    hdr: fits.Header, keywords: Sequence[str]
+) -> tuple[float | None, str | None]:
+    for key in keywords:
+        value = hdr.get(key)
+        if value is None:
+            continue
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(value):
+            return value, key
+    return None, None
+
+
 def extract_band_names_and_saturation(
-    sciimgs: Sequence[str], default_saturation: float = 10000
+    sciimgs: Sequence[str],
+    default_saturation: float = 10000,
+    saturation_keywords: Sequence[str] = SATURATION_KEYWORDS,
 ) -> tuple[list[str], list[float]]:
     """Extract per-image filter names and saturation values from FITS headers.
 
@@ -136,8 +163,9 @@ def extract_band_names_and_saturation(
     band_names
         Filter names, possibly with ``-N`` disambiguation suffixes.
     saturation_values
-        Saturation level for each image (read from ``SATLV``; falls back to
-        ``default_saturation`` if missing).
+        Saturation level for each image: the first of ``saturation_keywords``
+        (``SATURATE``, then ``SATLV``) present in the header, else
+        ``default_saturation`` (with a warning).
     """
     band_names_raw: list[str] = []
     saturation_values: list[float] = []
@@ -145,9 +173,15 @@ def extract_band_names_and_saturation(
         try:
             hdr = fits.getheader(img)
             band = str(hdr.get("FILTER", "UNKNOWN")).replace("-", "_")
-            saturation = float(hdr.get("SATLV", default_saturation))
+            saturation, _ = _first_header_value(hdr, saturation_keywords)
         except Exception:
             band = "UNKNOWN"
+            saturation = None
+        if saturation is None:
+            log.warning(
+                "No saturation keyword (%s) in %s; using %g",
+                "/".join(saturation_keywords), os.path.basename(img), default_saturation,
+            )
             saturation = float(default_saturation)
         band_names_raw.append(band)
         saturation_values.append(saturation)
@@ -165,6 +199,34 @@ def extract_band_names_and_saturation(
                 b = f"{b}-{occurrences[b]}"
         band_names.append(b)
     return band_names, saturation_values
+
+
+def extract_gain_values(
+    sciimgs: Sequence[str],
+    default_gain: float = 0.0,
+    gain_keywords: Sequence[str] = GAIN_KEYWORDS,
+) -> list[float]:
+    """Per-image gain [e-/ADU] for the measurement images.
+
+    Reads the first of ``gain_keywords`` (``EGAIN``, then ``GAIN``) present in
+    each header. A missing value falls back to ``default_gain`` with a
+    warning; the default ``0`` is SE++'s own "no gain" value (the Poisson
+    term of the flux error is dropped).
+    """
+    gains: list[float] = []
+    for img in sciimgs:
+        try:
+            gain, _ = _first_header_value(fits.getheader(img), gain_keywords)
+        except Exception:
+            gain = None
+        if gain is None:
+            log.warning(
+                "No gain keyword (%s) in %s; using %g",
+                "/".join(gain_keywords), os.path.basename(img), default_gain,
+            )
+            gain = float(default_gain)
+        gains.append(gain)
+    return gains
 
 
 def _primary_data_shape(image_path: str) -> tuple[int, ...]:
@@ -292,5 +354,8 @@ def build_coverage_mask(
 __all__ = [
     "organize_images_by_filter",
     "extract_band_names_and_saturation",
+    "extract_gain_values",
+    "GAIN_KEYWORDS",
+    "SATURATION_KEYWORDS",
     "build_coverage_mask",
 ]

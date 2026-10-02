@@ -393,6 +393,45 @@ def test_validity_cut_keeps_sources_with_enough_bands() -> None:
     assert list(mask) == [True, False, False]
 
 
+@pytest.mark.parametrize("use_zspec", [False, True])
+def test_regalade_zspec_toggle(monkeypatch, use_zspec) -> None:
+    """z_spec is written only when use_regalade_zspec is on, from spec codes only."""
+    from phot7ds.vac import VACConfig
+    from phot7ds.vac import fluxes
+
+    monkeypatch.setattr(fluxes, "detect_filters", lambda magtbl, cfg: ["f_7DS_m625"])
+    monkeypatch.setattr(fluxes, "_central_wavelengths", lambda cfg, f: {"f_7DS_m625": 6250.0})
+    monkeypatch.setattr(fluxes, "_tile_center", lambda tile_info: (0.0, 0.0))
+    monkeypatch.setattr(fluxes, "_extinction_by_filter", lambda cfg, lc, ra, dec: {"f_7DS_m625": 0.0})
+
+    magtbl = Table({
+        "aper05c_mag_m625": [18.0, 18.0, 18.0, 18.0],
+        "aper05c_mag_err_m625": [0.05, 0.05, 0.05, 0.05],
+        # spec code, photometric code, spec code with no z, spec code
+        "regalade_r_DistInput": [4, 1, 7, 0],
+        "regalade_z": [0.05, 0.10, np.nan, 0.02],
+    })
+    cfg = VACConfig(lib_dir="/lib", catalog_dir="/cat", output_root="/out",
+                    photoz_engine="eazy-py", use_regalade_zspec=use_zspec)
+    flux, _, info = fluxes.build_flux_catalog(magtbl, cfg, "T1", None, write=False)
+
+    if use_zspec:
+        assert list(flux["z_spec"]) == [0.05, -1.0, -1.0, 0.02]
+        assert info["n_zspec"] == 2
+    else:
+        assert "z_spec" not in flux.colnames
+        assert info["n_zspec"] == 0
+
+
+def test_regalade_zspec_is_off_by_default() -> None:
+    from phot7ds.vac import VACConfig
+
+    cfg = VACConfig(lib_dir="/lib", catalog_dir="/cat", output_root="/out",
+                    photoz_engine="eazy-py")
+    assert cfg.use_regalade_zspec is False
+    assert cfg.regalade_spec_codes == (4, 5, 6, 7, 8, 0, 2)
+
+
 # --- tile query geometry ------------------------------------------------
 def test_tile_query_box_deprojects_ra_span() -> None:
     from phot7ds.vac.vizier import tile_query_box

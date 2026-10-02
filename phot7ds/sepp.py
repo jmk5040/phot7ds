@@ -71,7 +71,7 @@ def generate_sepp_python_config(
     sciimgs: Sequence[str],
     band_names: Sequence[str],
     saturation_values: Sequence[float],
-    gain: float,
+    gain: float | Sequence[float],
     aperture_photometry: bool = True,
     aper_radius_pix: Sequence[float] | float | None = None,
     fixed_apertures: Sequence[float] | float | None = None,
@@ -93,9 +93,12 @@ def generate_sepp_python_config(
         already been disambiguated via index suffix
         (see :func:`phot7ds.images.extract_band_names_and_saturation`).
     saturation_values
-        Saturation level for each science image.
+        Saturation level for each science image (see
+        :func:`phot7ds.images.extract_band_names_and_saturation`).
     gain
-        Gain value applied uniformly to all measurement images.
+        Gain [e-/ADU] of each science image, 1:1 with ``sciimgs`` (see
+        :func:`phot7ds.images.extract_gain_values`). A scalar is applied to
+        every image.
     aperture_photometry
         Whether to add aperture photometry blocks.
     aper_radius_pix
@@ -109,25 +112,41 @@ def generate_sepp_python_config(
     str
         ``config_file`` (echoed for chaining).
     """
+    if isinstance(gain, (list, tuple, np.ndarray)):
+        gain_values = [float(g) for g in gain]
+    else:
+        gain_values = [float(gain)] * len(sciimgs)
+    if len(gain_values) != len(sciimgs):
+        raise ValueError(
+            f"gain ({len(gain_values)}) and sciimgs ({len(sciimgs)}) must match"
+        )
+    if len(saturation_values) != len(sciimgs):
+        raise ValueError(
+            f"saturation_values ({len(saturation_values)}) and sciimgs "
+            f"({len(sciimgs)}) must match"
+        )
+
     with open(config_file, "w") as f:
         f.write("from sourcextractor.config import *\n\n")
-        f.write("# Load measurement images with shared gain.\n")
         f.write("measurement_image_paths = [\n")
         for img in sciimgs:
             f.write(f"    '{os.path.abspath(img)}',\n")
         f.write("]\n\n")
-        f.write(
-            f"measurement_image_group = load_fits_images(measurement_image_paths, gain={gain})\n"
-        )
+        f.write("measurement_image_group = load_fits_images(measurement_image_paths)\n")
         f.write("measurement_group = MeasurementGroup(measurement_image_group)\n\n")
-        f.write("# Per-image saturation (from FITS header SATLV / SATURATE).\n")
+        f.write("# Per-image gain [e-/ADU] and saturation [ADU] of the measurement\n")
+        f.write("# images (from their own EGAIN / SATURATE header keys).\n")
+        f.write("gain_values = [\n")
+        for g in gain_values:
+            f.write(f"    {g!r},\n")
+        f.write("]\n")
         f.write("saturation_values = [\n")
         for sat in saturation_values:
-            f.write(f"    {float(sat):.2f},\n")
+            f.write(f"    {float(sat)!r},\n")
         f.write("]\n\n")
         f.write("for idx, img in enumerate(measurement_group):\n")
-        f.write("    if idx < len(saturation_values):\n")
-        f.write("        img.saturation = saturation_values[idx]\n\n")
+        f.write("    img.gain = gain_values[idx]\n")
+        f.write("    img.saturation = saturation_values[idx]\n\n")
 
         if aperture_photometry:
             if aper_radius_pix is None:

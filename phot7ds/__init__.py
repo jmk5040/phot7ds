@@ -90,6 +90,7 @@ from .filters import DEFAULT_BANDS, get_filter_definitions
 from .images import (
     build_coverage_mask,
     extract_band_names_and_saturation,
+    extract_gain_values,
     organize_images_by_filter,
 )
 from .masks import (
@@ -126,7 +127,7 @@ from .sepp import (
 )
 from .tile_geometry import trim_to_tile_polygon
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 __all__ = [
     "__version__",
@@ -150,6 +151,7 @@ __all__ = [
     "get_filter_definitions",
     "organize_images_by_filter",
     "extract_band_names_and_saturation",
+    "extract_gain_values",
     "build_coverage_mask",
     # SE++
     "DEFAULT_OUTPUT_PROPERTIES",
