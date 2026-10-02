@@ -4,6 +4,33 @@ All notable changes to `phot7ds`. Versions follow
 [semantic versioning](https://semver.org/) loosely: the minor number moves on
 new features or behaviour changes, the patch number on fixes.
 
+## v0.8.1 — 2026-10-02
+
+Provenance and zero-point solutions in the run log and manifest. Catalog
+columns and values are unchanged; the outputs that do change are the log
+and the manifest (and `PHOTVER`).
+
+### Added
+
+- **Software provenance** (`phot7ds.provenance`): the log opens with a
+  `Software:` line and the manifest gains `"provenance"` — phot7ds
+  version, git commit / `describe` / `dirty` of the checkout in use (only
+  when the repository is the one holding the package), `sourcextractor++
+  --version`, Python version. Until now the version was only in the
+  catalog header (`PHOTVER`), so a failed or skipped run left no trace of it.
+- **Zero-point solutions**: one `ZP <band> <aperture>: constant ...` line
+  (constant ZP, scatter, stars, spatial RMSE, surface min/median/max on the
+  catalog, fitted pixel range) and one `... coeffs ...` line (full-precision
+  `Polynomial2D` coefficients) per band x aperture; the same record, plus the
+  selection (`mag_range`, match radius, flag cut), under `"zeropoints"` in
+  the manifest. Also on `cat.meta["zp_solutions"]` in memory.
+  `apply_spatial_zeropoint(info=...)` returns the fit counts and ranges.
+
+### Changed
+
+- The old `Spatial ZP: fitting with ...` / `Spatial ZP RMSE = ...` lines,
+  which did not say which aperture the RMSE belonged to, are now DEBUG.
+
 ## v0.8.0 — 2026-10-02
 
 SE++ now measures every image with **its own gain and saturation level**.

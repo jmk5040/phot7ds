@@ -131,6 +131,21 @@ print(result.log_file)
 print(result.n_sources)
 ```
 
+The log opens with a `Software:` line (phot7ds version, git commit and
+whether the checkout had uncommitted changes, SE++ version, Python), also
+stored under `"provenance"` in the manifest. Every band x aperture
+zero-point solution is logged as two lines,
+
+```
+ZP m875 aper05: constant 23.6756 +/- 0.0429 (n=431) | spatial deg 2: 418/436 stars, RMSE 0.0467, surface min/med/max 23.6110/23.6857/23.7367, fit x 363-9873 y 218-6513
+ZP m875 aper05: coeffs (pixel_centroid_x, pixel_centroid_y) c0_0=23.667... c1_0=2.269...e-05 ...
+```
+
+and stored under `"zeropoints"["aper05__m875"]` in the manifest. The
+spatial surface is rebuilt exactly with
+`astropy.modeling.models.Polynomial2D(degree, **coeffs)(x, y)` and added to
+the raw instrumental magnitude to give `aper05c_mag_m875`.
+
 The raw SE++ output is written alongside the final catalog as
 `{run_name}_raw.fits`, so the two are easy to tell apart on disk.
 

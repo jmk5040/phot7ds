@@ -113,6 +113,7 @@ def apply_spatial_zeropoint(
     mag_ref_col: str = "mag_r",
     poly_degree: int = 2,
     new_col: str | None = "auto_mag_corrected",
+    info: dict | None = None,
 ) -> tuple[Table, models.Polynomial2D, float]:
     """Fit a 2-D polynomial zero-point surface to reference stars and apply it.
 
@@ -136,6 +137,11 @@ def apply_spatial_zeropoint(
         If given, a new column with the spatially-corrected magnitude is
         added to ``target_tbl``. If ``None``, only the fit + RMSE are
         returned.
+    info
+        If given, filled in place with the fit statistics: ``n_input``,
+        ``n_fit`` (after the 3-sigma clip), ``n_rmse`` (residuals kept by the
+        2.5-sigma clip for the RMSE), ``x_range`` / ``y_range`` of the fitted
+        stars.
 
     Returns
     -------
@@ -162,7 +168,7 @@ def apply_spatial_zeropoint(
     mask[finite] = ~clipped.mask
     x_clean, y_clean, zp_clean = x[mask], y[mask], raw_zp[mask]
 
-    log.info(
+    log.debug(
         "Spatial ZP: fitting with %d/%d stars for %s (ref %s)",
         len(zp_clean), len(raw_zp), mag_inst_col, mag_ref_col,
     )
@@ -174,7 +180,16 @@ def apply_spatial_zeropoint(
     residuals = zp_clean - zp_model(x_clean, y_clean)
     residuals = residuals[~sigma_clip(residuals, sigma=2.5, maxiters=3).mask]
     zp_rmse = float(np.std(residuals))
-    log.info("Spatial ZP RMSE = %.4f mag", zp_rmse)
+    log.debug("Spatial ZP RMSE (%s) = %.4f mag", mag_inst_col, zp_rmse)
+
+    if info is not None:
+        info.update(
+            n_input=int(len(raw_zp)),
+            n_fit=int(len(zp_clean)),
+            n_rmse=int(len(residuals)),
+            x_range=[float(np.min(x_clean)), float(np.max(x_clean))] if len(x_clean) else None,
+            y_range=[float(np.min(y_clean)), float(np.max(y_clean))] if len(y_clean) else None,
+        )
 
     if new_col is not None:
         spatial_zp = zp_model(_as_array(target_tbl[x_col]), _as_array(target_tbl[y_col]))
@@ -268,6 +283,7 @@ def calibrate_zeropoints(
             ztbl = cat[zmask].copy()
             ztbl[f"{REF_PREFIX}mag_{band_ref}"] = gaia_mag_all[zmask]
 
+            fit_info: dict = {}
             ztbl, zp_model, zp_rmse = apply_spatial_zeropoint(
                 target_tbl=ztbl,
                 ref_tbl=ztbl,
@@ -277,6 +293,7 @@ def calibrate_zeropoints(
                 mag_ref_col=f"{REF_PREFIX}mag_{band_ref}",
                 poly_degree=spatial_poly_degree,
                 new_col=f"{aperture}c_mag_{band}",
+                info=fit_info,
             )
 
             mag_diff = np.asarray(
@@ -325,6 +342,16 @@ def calibrate_zeropoints(
                 np.asarray(cat["pixel_centroid_x"], dtype=float),
                 np.asarray(cat["pixel_centroid_y"], dtype=float),
             )
+            solution = _zp_solution(
+                zp_model, zp_rmse, fit_info,
+                const_zp=float(zp), const_zp_err=float(zperr), n_const=int(mag_diff.size),
+                surface=spatial_zp_full,
+                inst_col=f"{aperture}_mag_{band}", ref_col=gaia_mag_col,
+                mag_range=mag_range, match_radius_arcsec=match_radius_arcsec,
+                band_flag_cut=band_flag_cut,
+            )
+            cat.meta.setdefault("zp_solutions", {})[(aperture, band)] = solution
+            _log_zp_solution(band, aperture, solution)
             cat[f"{aperture}c_mag_{band}"] = (
                 cat[f"{aperture}_mag_{band}"] + spatial_zp_full
             )
@@ -336,6 +363,74 @@ def calibrate_zeropoints(
                 cat[f"{aperture}_mag_err_{band}"], zp_rmse
             )
     return cat
+
+
+def _zp_solution(
+    zp_model: models.Polynomial2D,
+    zp_rmse: float,
+    fit_info: dict,
+    *,
+    const_zp: float,
+    const_zp_err: float,
+    n_const: int,
+    surface: np.ndarray,
+    inst_col: str,
+    ref_col: str,
+    mag_range: tuple[float, float],
+    match_radius_arcsec: float,
+    band_flag_cut: int,
+) -> dict:
+    """JSON-safe record of one band x aperture ZP solution.
+
+    The surface is ``ZP(x, y) = sum c{i}_{j} x**i y**j`` in SE++ pixel
+    coordinates (``x_col`` / ``y_col``), added to the instrumental magnitude;
+    ``coeffs`` holds the astropy ``Polynomial2D`` parameters by name, so
+    ``models.Polynomial2D(degree, **coeffs)`` rebuilds it exactly.
+    """
+    surf = np.asarray(surface, dtype=float)
+    surf = surf[np.isfinite(surf)]
+    return {
+        "inst_col": inst_col,
+        "ref_col": ref_col,
+        "constant": {"zp": const_zp, "zp_err": const_zp_err, "n": n_const},
+        "spatial": {
+            "model": "Polynomial2D",
+            "degree": int(zp_model.degree),
+            "x_col": "pixel_centroid_x",
+            "y_col": "pixel_centroid_y",
+            "coeffs": {name: float(val) for name, val in
+                       zip(zp_model.param_names, zp_model.parameters)},
+            "rmse": float(zp_rmse),
+            **fit_info,
+            "surface_on_catalog": (
+                {"min": float(surf.min()), "median": float(np.median(surf)),
+                 "max": float(surf.max())} if surf.size else None
+            ),
+        },
+        "selection": {
+            "mag_range": [float(mag_range[0]), float(mag_range[1])],
+            "match_radius_arcsec": float(match_radius_arcsec),
+            "flag_cut": int(band_flag_cut),
+        },
+    }
+
+
+def _log_zp_solution(band: str, aperture: str, sol: dict) -> None:
+    const, sp = sol["constant"], sol["spatial"]
+    surf = sp.get("surface_on_catalog") or {}
+    xr, yr = sp.get("x_range") or (np.nan, np.nan), sp.get("y_range") or (np.nan, np.nan)
+    log.info(
+        "ZP %s %s: constant %.4f +/- %.4f (n=%d) | spatial deg %d: %d/%d stars, "
+        "RMSE %.4f, surface min/med/max %.4f/%.4f/%.4f, fit x %.0f-%.0f y %.0f-%.0f",
+        band, aperture, const["zp"], const["zp_err"], const["n"],
+        sp["degree"], sp.get("n_fit", -1), sp.get("n_input", -1), sp["rmse"],
+        surf.get("min", np.nan), surf.get("median", np.nan), surf.get("max", np.nan),
+        xr[0], xr[1], yr[0], yr[1],
+    )
+    log.info(
+        "ZP %s %s: coeffs (%s, %s) %s", band, aperture, sp["x_col"], sp["y_col"],
+        " ".join(f"{k}={v!r}" for k, v in sp["coeffs"].items()),
+    )
 
 
 __all__ = [

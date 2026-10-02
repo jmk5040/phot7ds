@@ -2,7 +2,7 @@
 
 Working memory for the `phot7ds` package and the 7DS/RIS scripts around it.
 Read this first when starting a new session. Version at time of writing:
-**phot7ds 0.8.0** (`phot7ds/__init__.py`, `pyproject.toml`).
+**phot7ds 0.8.1** (`phot7ds/__init__.py`, `pyproject.toml`).
 
 ---
 
@@ -402,6 +402,24 @@ bitmask internally). Details in §5 and README "Per-band mask flags".
    flux `.cat` (others −1); FAST++ fits at z_spec, EAzY only reports it.
    Off → no `z_spec` column. `RIS_vac.py` turns it on by default
    (`USE_ZSPEC = True`, `--no-zspec` to disable).
+
+## 9f. Recent changes (2026-10-02, v0.8.1) — log / manifest provenance
+
+- `phot7ds/provenance.py`: `collect_provenance()` (version, git commit /
+  describe / dirty, SE++ `--version`, Python) → log `Software:` line +
+  manifest `"provenance"`. Releases are annotated tags `vX.Y.Z` (v0.8.1 on
+  its release commit; v0.6.0, v0.7.1 and v0.8.0 are untagged), so
+  `describe` matches the version on a tagged checkout.
+- `calibration.calibrate_zeropoints` stores `cat.meta["zp_solutions"]
+  [(aper, band)]` (constant ZP/err/n, `Polynomial2D` coeffs by name, RMSE,
+  n_input/n_fit/n_rmse, fit x/y range, surface min/med/max, selection) and
+  logs `ZP <band> <aper>: constant ...` + `... coeffs ...`; the pipeline
+  copies it to manifest `"zeropoints"` (`"aper05__m875"`) before the
+  dict-valued meta is dropped. Verified on T08147 (g, m875): rebuilding
+  `aper05c_mag_m875` from raw + manifest coeffs gives max |diff| = 0.
+- Open (user to decide): the full-catalog constant-ZP column
+  `{aper}_mag_err_*` adds `zp_rmse` (spatial RMSE), not `zperr` (constant
+  scatter), unlike the calibration subset and the docstring.
 
 ## 10. Open / possible next steps
 

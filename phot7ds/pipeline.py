@@ -54,6 +54,7 @@ from .masks import (
     resolve_count_masks,
 )
 from .presets import PRESET_TUNING_FIELDS, resolve_preset
+from .provenance import collect_provenance, format_provenance
 from .schema import (
     build_canonical_schema,
     standardize_catalog as apply_standard_catalog,
@@ -647,6 +648,8 @@ def run_photometry(
         return _summarise_existing(zp_catalog_path, manifest_path, log_file)
 
     log.info("=== phot7ds run: %s ===", run_name)
+    provenance = collect_provenance()
+    log.info("Software: %s", format_provenance(provenance))
     log.info("Detection image: %s", detection_image)
     log.info("Science images : %d", len(science_images))
 
@@ -820,6 +823,7 @@ def run_photometry(
             plot_dir=plot_dir,
             plot_title_extra=run_name,
         )
+        zp_solutions = dict(cat.meta.get("zp_solutions") or {})
 
         # Persist constant ZP + scatter as FITS-safe header keys
         # (e.g. ZP05MG, ZE05MG, ZP10M575).
@@ -901,6 +905,7 @@ def run_photometry(
 
         manifest = {
             "run_name": run_name,
+            "provenance": provenance,
             "detection_image": str(detection_image),
             "detection_label": cfg.detection_label,
             "coverage_mask": str(coverage_mask) if coverage_mask and coverage_mask_kept else None,
@@ -927,6 +932,10 @@ def run_photometry(
                 "staging": staging.location,
                 "staging_seconds": round(staging.seconds, 2) if staging.seconds else None,
                 "bands": {band: info.to_dict() for band, info in band_masks.items()},
+            }
+        if zp_solutions:
+            manifest["zeropoints"] = {
+                f"{aper}__{band}": sol for (aper, band), sol in zp_solutions.items()
             }
         if depth_results:
             manifest["depths"] = {

@@ -412,6 +412,67 @@ def test_annotate_catalog_meta_records_measurement_gain() -> None:
     assert meta["SATUR001"][0] == 4612.0
 
 
+def test_zp_solution_is_recorded_and_reproducible(caplog) -> None:
+    """Each band x aperture ZP solution is logged and rebuilds the surface exactly."""
+    import json
+    import logging
+
+    from astropy.modeling import models
+
+    from phot7ds.calibration import calibrate_zeropoints
+
+    rng = np.random.default_rng(1)
+    n = 400
+    x = rng.uniform(1, 10000, n)
+    y = rng.uniform(1, 7000, n)
+    ra = 150.0 + x * 1e-5
+    dec = 2.0 + y * 1e-5
+    ref = rng.uniform(12.5, 15.5, n)
+    true_zp = 23.9 + 2e-6 * x - 3e-6 * y + 1e-10 * x * y
+    cat = Table({
+        "world_centroid_alpha": ra, "world_centroid_delta": dec,
+        "pixel_centroid_x": x, "pixel_centroid_y": y,
+        "aper05_mag_m500": ref - true_zp + rng.normal(0, 0.005, n),
+        "aper05_mag_err_m500": np.full(n, 0.01),
+        "aper05_flags_m500": np.zeros(n, dtype=int),
+    })
+    ref_cat = Table({"ra": ra, "dec": dec, "mag_m500": ref})
+
+    with caplog.at_level(logging.INFO, logger="phot7ds.calibration"):
+        calibrate_zeropoints(cat, ref_cat=ref_cat, band_names=["m500"], apertures=["aper05"])
+
+    sol = cat.meta["zp_solutions"][("aper05", "m500")]
+    json.dumps(sol)
+    sp = sol["spatial"]
+    assert sp["degree"] == 2 and sp["n_input"] == n and 0 < sp["n_fit"] <= n
+    assert sol["inst_col"] == "aper05_mag_m500"
+    rebuilt = models.Polynomial2D(sp["degree"], **sp["coeffs"])
+    np.testing.assert_allclose(
+        np.asarray(cat["aper05c_mag_m500"]),
+        np.asarray(cat["aper05_mag_m500"]) - sol["constant"]["zp"] + rebuilt(x, y),
+        atol=1e-9,
+    )
+    np.testing.assert_allclose(rebuilt(x, y), true_zp, atol=0.005)
+
+    lines = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("ZP m500 aper05: constant") for m in lines)
+    assert any(m.startswith("ZP m500 aper05: coeffs") and "c1_1=" in m for m in lines)
+    assert not any(m.startswith("Spatial ZP") for m in lines)
+
+
+def test_provenance_reports_version_and_git() -> None:
+    import phot7ds
+    from phot7ds.provenance import collect_provenance, format_provenance
+
+    prov = collect_provenance()
+    assert prov["phot7ds_version"] == phot7ds.__version__
+    assert prov["python_version"]
+    line = format_provenance(prov)
+    assert line.startswith(f"phot7ds {phot7ds.__version__} | ")
+    if prov["git"] is not None:
+        assert len(prov["git"]["commit"]) == 40
+
+
 def test_config_io_required_files_raise(tmp_path) -> None:
     """``require_*`` helpers raise informative errors when files are missing."""
     from phot7ds import require_gaiaxp_reference, require_tile_table
