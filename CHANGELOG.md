@@ -21,26 +21,15 @@ by up to 0.5 mag in the red medium bands.
   Apertures that touch no-data (0 / NaN) pixels are also rejected. On
   T00236 (23 bands), the median UL5RM − header offset goes from −0.22 to
   −0.15 mag. m850 rises 16.34 → 16.69 and m875 rises 16.42 → 16.76. g, r
-  and i are unchanged. Pass `background_cell_size=None` for the old
-  behaviour.
-
-### Added
-
-- `UL{N}WM{BAND}` header card: white-noise depth from the
-  background-subtracted pixel RMS × √n_pix. It uses the same convention
-  as the coadd `UL5_*` cards and agrees with them within ~0.05 mag.
-- Manifest depth entries gain `depth_white`, `white_sigma`, `pixel_sigma`,
-  `correlation_ratio` (σ_aper / white σ) and `background`. The log table
-  gains `white` / `corr` columns.
+  and i are unchanged.
 
 ### Notes
 
 - UL5RM is still ~0.15 mag shallower than the header. That gap is
-  pixel-to-pixel correlated noise from resampling and coadding
-  (`correlation_ratio` ≈ 1.2: 1.0 at a 1-pixel aperture, growing with
-  radius). It is real noise. The coadd header and the error-curve depth
-  both assume white noise, so UL5RM is the more honest depth, and UL5WM is
-  the number to compare with the header.
+  pixel-to-pixel correlated noise from resampling and coadding: the ratio
+  of aperture σ to the white-noise expectation (pixel σ × √n_pix) is 1.0
+  at a 1-pixel aperture and ~1.2 at 5″. It is real noise. The coadd
+  header and the error-curve depth both assume white noise.
 
 ## v0.9.0 — 2026-10-05
 

@@ -347,7 +347,7 @@ def empty_aperture_sky_sigma(
     seed: int = 42,
     sigma_clip: float = 3.0,
     max_attempts: int = 20,
-    background_cell_size: int | None = 256,
+    background_cell_size: int = 256,
     smoothing_box_size: int = 3,
 ) -> dict[str, float | int]:
     """Estimate the sky sigma in a circular aperture from empty regions.
@@ -359,11 +359,8 @@ def empty_aperture_sky_sigma(
     ``smoothing_box_size``, the SE++ run's settings) is subtracted from each
     aperture sum, so large-scale sky structure that never reaches the SE++
     fluxes does not inflate the noise. The sigma-clipped standard deviation
-    of the sums is the per-aperture sky noise; it still includes the
-    pixel-to-pixel correlated noise of a resampled coadd, which
-    ``white_sigma`` (pixel sigma x sqrt(aperture pixels), the header
-    ``SKYSIG`` convention) leaves out. ``background_cell_size=None`` sums
-    the raw image (pre-0.9.1 behaviour).
+    of the sums is the per-aperture sky noise, including the pixel-to-pixel
+    correlated noise of a resampled coadd.
 
     Parameters
     ----------
@@ -403,16 +400,15 @@ def empty_aperture_sky_sigma(
         Maximum number of candidate-generation rounds before giving up.
     background_cell_size, smoothing_box_size
         Mesh size and grid median filter of the subtracted background
-        (match the SE++ run); ``background_cell_size=None`` disables it.
+        (match the SE++ run).
 
     Apertures touching a zero / NaN (no-data) pixel are rejected.
 
     Returns
     -------
     dict
-        ``{sky_sigma, pixel_sigma, white_sigma, correlation_ratio,
-        background, n_apertures, n_attempts, mean, median, status}``.
-        ``correlation_ratio = sky_sigma / white_sigma``. ``status`` is
+        ``{sky_sigma, n_apertures, n_attempts, mean, median, status}``.
+        ``status`` is
         ``'ok'`` if at least ``n_apertures // 4`` apertures were accepted,
         otherwise ``'insufficient'``.
     """
@@ -476,10 +472,7 @@ def empty_aperture_sky_sigma(
     valid = np.isfinite(data) & (data != 0)
     if covmask is not None:
         valid &= ~covmask
-    bkg = (
-        mesh_background(data, valid, background_cell_size, smoothing_box_size)
-        if background_cell_size else None
-    )
+    bkg = mesh_background(data, valid, background_cell_size, smoothing_box_size)
 
     rng = np.random.default_rng(seed)
     accepted_sums: list[float] = []
@@ -533,30 +526,10 @@ def empty_aperture_sky_sigma(
 
     sums = np.asarray(accepted_sums, dtype=np.float64)
     xy = np.asarray(accepted_xy, dtype=float)
-    if bkg is not None:
-        sums = sums - npix_aper * bkg(xy[:, 0], xy[:, 1])
+    sums = sums - npix_aper * bkg(xy[:, 0], xy[:, 1])
     mean, median, sigma = sigma_clipped_stats(sums, sigma=sigma_clip, maxiters=5)
-
-    # Per-pixel sigma at random valid pixels, for the white-noise comparison.
-    py = rng.integers(0, ny, size=200_000)
-    px = rng.integers(0, nx, size=200_000)
-    keep = valid[py, px]
-    if tree is not None and keep.any():
-        keep[keep] = tree.query(np.column_stack([px[keep], py[keep]]), k=1)[0] > exclusion_radius_pix
-    pix = data[py[keep], px[keep]].astype(np.float64)
-    if bkg is not None and pix.size:
-        pix = pix - bkg(px[keep], py[keep])
-    pix_sigma = (
-        float(sigma_clipped_stats(pix, sigma=sigma_clip, maxiters=10)[2])
-        if pix.size > 100 else float("nan")
-    )
-    white_sigma = pix_sigma * np.sqrt(npix_aper)
     return {
         "sky_sigma": float(sigma),
-        "pixel_sigma": pix_sigma,
-        "white_sigma": float(white_sigma),
-        "correlation_ratio": float(sigma / white_sigma) if white_sigma > 0 else float("nan"),
-        "background": f"mesh{int(background_cell_size)}" if bkg is not None else "none",
         "n_apertures": len(accepted_sums),
         "n_attempts": n_attempts,
         "mean": float(mean),
@@ -579,15 +552,14 @@ def depth_from_empty_apertures(
     coverage_mask: str | np.ndarray | None = None,
     n_apertures: int = 2000,
     seed: int = 42,
-    background_cell_size: int | None = 256,
+    background_cell_size: int = 256,
     smoothing_box_size: int = 3,
 ) -> dict[str, float | int | str]:
     """Combine :func:`empty_aperture_sky_sigma` with the classical formula.
 
     Returns the empty-aperture sigma fields plus ``depth`` (from
-    ``sky_sigma``), ``depth_white`` (from ``white_sigma``: uncorrelated
-    pixel noise, the convention of the coadd header's ``UL5_*``),
-    ``zeropoint``, ``aperture_radius_pix`` and ``n_sigma`` for traceability.
+    ``sky_sigma``), ``zeropoint``, ``aperture_radius_pix`` and ``n_sigma``
+    for traceability.
     Source positions are taken from ``source_ra``/``source_dec`` (converted
     via the image WCS) when available, otherwise from ``source_x``/
     ``source_y``.
@@ -613,10 +585,6 @@ def depth_from_empty_apertures(
     found = stats["status"] != "missing_image"
     out["depth"] = (
         classical_limiting_mag(n_sigma, zeropoint, stats["sky_sigma"])
-        if found else float("nan")
-    )
-    out["depth_white"] = (
-        classical_limiting_mag(n_sigma, zeropoint, stats.get("white_sigma", float("nan")))
         if found else float("nan")
     )
     return out
@@ -657,7 +625,7 @@ def estimate_depths(
     seed: int = 42,
     do_error_curve: bool = True,
     do_empty_apertures: bool = True,
-    background_cell_size: int | None = 256,
+    background_cell_size: int = 256,
     smoothing_box_size: int = 3,
 ) -> dict[tuple[str, str], dict[str, float | int | str]]:
     """Run both depth methods for every ``(band, aperture)`` combination.
@@ -780,7 +748,7 @@ def format_depth_table(
     lines = []
     header = (
         f"{n_sigma:.0f}-sigma depth (mag)   "
-        "| curve_fit  n     R^2    | empty_aper  n     sigma_ADU | white   corr"
+        "| curve_fit  n     R^2    | empty_aper  n     sigma_ADU"
     )
     lines.append(header)
     lines.append("-" * len(header))
@@ -796,8 +764,6 @@ def format_depth_table(
             f"{empty.get('depth', float('nan')):7.3f}"
             f"  {empty.get('n_apertures', 0):5d}"
             f"  {empty.get('sky_sigma', float('nan')):<9.4g}"
-            f" | {empty.get('depth_white', float('nan')):6.3f}"
-            f"  {empty.get('correlation_ratio', float('nan')):4.2f}"
             if empty else "   ---       ---     ---"
         )
         lines.append(
@@ -815,7 +781,6 @@ def format_depth_table(
 #
 #   UL{N}EM{BAND}      N-sigma depth, error-curve fit, 5" aperture [mag]
 #   UL{N}RM{BAND}      N-sigma depth, background-RMS sampling, 5" aperture [mag]
-#   UL{N}WM{BAND}      N-sigma depth from the pixel sigma (white noise), 5" [mag]
 #   BRMSM{BAND}        Empty-aperture sky sigma (background RMS), 5" aperture [ADU]
 #
 #   ZP{APER}M{BAND}    Constant zero-point in magnitudes
@@ -945,9 +910,6 @@ def depth_results_to_meta(
       [mag].
     - ``UL{N}RM{BAND}`` -- N-sigma depth from the empty-aperture / background
       RMS sampling [mag] (includes correlated noise).
-    - ``UL{N}WM{BAND}`` -- N-sigma depth from the per-pixel sky sigma times
-      sqrt(aperture pixels) [mag]: white noise, comparable to the coadd
-      header's ``UL5_*``.
     - ``BRMSM{BAND}``   -- background-subtracted empty-aperture sky sigma used to compute the
       depth above [ADU per 5" aperture].
 
@@ -983,12 +945,6 @@ def depth_results_to_meta(
         # Sky sigma in ADU (raw empty-aperture noise; useful for sanity
         # checks and downstream limit-mag recomputation with an updated ZP).
         empty = entry.get("empty") or {}
-        white = empty.get("depth_white", float("nan"))
-        if np.isfinite(white):
-            _set_card(meta, owners, _depth_keyword(n, "W", band, band_keys), (
-                round(float(white), 3),
-                f"{n}sig {aperture} {band} white-noise depth [mag]",
-            ), band)
         sigma = empty.get("sky_sigma", float("nan"))
         if np.isfinite(sigma):
             _set_card(meta, owners, _sky_sigma_keyword(band, band_keys), (

@@ -575,10 +575,7 @@ by side:
    pixel-to-pixel correlated noise (from resampling/coadding), which the
    error curve and the coadd header's `UL5_*` (both white-noise
    estimates) miss, so it usually comes out ~0.1–0.2 mag shallower than
-   those. Each band also gets the white-noise depth
-   `ZP − 2.5·log10(N · σ_pix · √n_pix)`, which can be compared directly
-   with the header, and the ratio `σ_aper / (σ_pix · √n_pix)`
-   (`correlation_ratio`, ~1.2 on 7DS coadds).
+   those.
 
 Results are written to:
 
@@ -590,8 +587,6 @@ Results are written to:
     [mag].
   - `UL{N}RM{BAND}` -- N-sigma depth from the empty-aperture / background
     RMS sampling [mag] (includes correlated noise).
-  - `UL{N}WM{BAND}` -- white-noise N-sigma depth from the background-
-    subtracted pixel RMS [mag]; same convention as the coadd `UL5_*`.
   - `BRMSM{BAND}`   -- the empty-aperture sky sigma in ADU, useful for
     recomputing the limiting magnitude with an updated ZP.
 

@@ -476,14 +476,13 @@ From a user report (`RIS/bin/phot7ds_claim*.png`, items 2 and 6):
 - Fix: `depth.mesh_background` (SExtractor mode estimator per cell, median
   filter, bicubic spline) uses the run's `background_cell_size` /
   `smoothing_box_size`, as SE++ does. Apertures that touch no-data pixels
-  are rejected. `background_cell_size=None` gives the old behaviour.
+  are rejected. No opt-out: the raw-sum method was wrong.
 - The remaining offset (T00236 median UL5RM − header = −0.15) is
   correlated noise: the aperture/pixel σ ratio is 1.0 at r=1 px and ~1.2
   at r=5″ apertures. It is real. The coadd `UL5_*` and the error curve
-  both assume white noise. New `UL{N}WM{key}` (white-noise depth) agrees
-  with the header within +0.05 mag. Manifest depth entries gain
-  `depth_white`, `white_sigma`, `pixel_sigma`, `correlation_ratio`,
-  `background`.
+  both assume white noise. A separate white-noise depth card was
+  considered and dropped (user: keep it simple; header/curve already give
+  that number).
 
 ## 10. Open / possible next steps
 
