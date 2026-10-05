@@ -226,12 +226,12 @@ def strip_nonfits_units(table: Table) -> None:
 
 
 def load_unified_catalog(path: str, fill_nan: bool = True) -> Table:
-    """Read a unified FITS catalog written by this pipeline.
+    """Read a unified catalog written by this pipeline (FITS or Parquet).
 
     Parameters
     ----------
     path
-        FITS file path.
+        ``.fits`` or ``.parquet`` path (see :func:`phot7ds.read_catalog`).
     fill_nan
         If True (default), replace the on-disk sentinel ``PLACEHOLDER_FILL``
         with ``np.nan`` in memory. If False, keep the sentinel visible.
@@ -243,7 +243,9 @@ def load_unified_catalog(path: str, fill_nan: bool = True) -> Table:
     (unmasked) Column for them. SE++'s low-SNR cells stay as
     :class:`~astropy.table.MaskedColumn` (``'--'``) in both modes.
     """
-    cat = Table.read(path)
+    from .catalog_io import read_catalog
+
+    cat = read_catalog(path)
     for cname in placeholder_columns(cat):
         col = cat[cname]
         data = np.asarray(col.data, dtype=col.dtype).copy()

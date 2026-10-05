@@ -76,37 +76,12 @@ def filter_colorization(unit: str = "angstrom"):
     Returns ``(bands_dict, bands_width, bands_color, lambda_to_color,
     lambda_to_band)`` where ``bands_dict`` maps band name -> central
     wavelength (the key order also defines the canonical band order).
+    Alias of :func:`phot7ds.filters.get_filter_definitions`, i.e. read from
+    the filter registry.
     """
-    import matplotlib.pyplot as plt
-    from matplotlib import cm
+    from .filters import get_filter_definitions
 
-    if unit == "angstrom":
-        broad_bands = {"g": 4770, "r": 6231, "i": 7625}
-        bb_width = {"g": 1263 / 2, "r": 1149 / 2, "i": 1239 / 2}
-        bb_color = {"g": "lightgreen", "r": "lightcoral", "i": "coral"}
-        medium_bands = {f"m{w}": w * 10 for w in range(400, 900, 25)}
-        mb_width = {f"m{w}": 125 for w in range(400, 900, 25)}
-    elif unit == "nm":
-        broad_bands = {"g": 477.0, "r": 623.1, "i": 762.5}
-        bb_width = {"g": 126.3 / 2, "r": 114.9 / 2, "i": 123.9 / 2}
-        bb_color = {"g": "lightgreen", "r": "lightcoral", "i": "coral"}
-        medium_bands = {f"m{w}": w for w in range(400, 900, 25)}
-        mb_width = {f"m{w}": 12.5 for w in range(400, 900, 25)}
-    else:
-        raise ValueError("unit must be 'angstrom' or 'nm'")
-
-    medium_wavelengths = list(range(400, 900, 25))
-    norm = plt.Normalize(min(medium_wavelengths), max(medium_wavelengths))
-    cmap = cm.coolwarm
-    mb_color = {f"m{w}": cmap(norm(w)) for w in medium_wavelengths}
-
-    bands_dict = {**broad_bands, **medium_bands}
-    bands_width = {**bb_width, **mb_width}
-    bands_color = {**bb_color, **mb_color}
-    lambda_to_color = {bands_dict[b]: bands_color[b] for b in bands_dict}
-    lambda_to_band = {v: k for k, v in bands_dict.items()}
-
-    return bands_dict, bands_width, bands_color, lambda_to_color, lambda_to_band
+    return get_filter_definitions(unit=unit)
 
 
 __all__ = [

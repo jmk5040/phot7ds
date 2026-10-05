@@ -86,12 +86,27 @@ from .depth import (
     magerr_threshold_for_n_sigma,
     zeropoints_to_meta,
 )
-from .filters import DEFAULT_BANDS, get_filter_definitions
+from .catalog_io import (
+    FITS_MAX_COLUMNS,
+    catalog_nrows,
+    read_catalog,
+    resolve_output_format,
+    write_catalog,
+)
+from .filters import (
+    DEFAULT_BANDS,
+    FilterInfo,
+    FilterRegistry,
+    get_filter_definitions,
+    load_filter_registry,
+)
 from .images import (
     build_coverage_mask,
     extract_band_names_and_saturation,
     extract_gain_values,
+    identify_image_filter,
     organize_images_by_filter,
+    select_images_by_filter,
 )
 from .masks import (
     MASKBIT,
@@ -127,7 +142,7 @@ from .sepp import (
 )
 from .tile_geometry import trim_to_tile_polygon
 
-__version__ = "0.8.2"
+__version__ = "0.9.0"
 
 __all__ = [
     "__version__",
@@ -148,7 +163,12 @@ __all__ = [
     "resolve_preset",
     # filters / images
     "DEFAULT_BANDS",
+    "FilterInfo",
+    "FilterRegistry",
+    "load_filter_registry",
     "get_filter_definitions",
+    "identify_image_filter",
+    "select_images_by_filter",
     "organize_images_by_filter",
     "extract_band_names_and_saturation",
     "extract_gain_values",
@@ -190,6 +210,11 @@ __all__ = [
     "standardize_catalog",
     "strip_nonfits_units",
     "load_unified_catalog",
+    "read_catalog",
+    "write_catalog",
+    "catalog_nrows",
+    "resolve_output_format",
+    "FITS_MAX_COLUMNS",
     # geometry / logging
     "trim_to_tile_polygon",
     "configure_logging",

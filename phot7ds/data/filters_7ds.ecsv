@@ -1,0 +1,56 @@
+# %ECSV 1.0
+# ---
+# datatype:
+# - {name: name, datatype: string}
+# - {name: kind, datatype: string}
+# - {name: lambda_pivot_nm, unit: nm, datatype: float64}
+# - {name: fwhm_nm, unit: nm, datatype: float64}
+# - {name: key, datatype: string}
+# meta: !!omap
+# - {description: 'phot7ds filter registry: one row per 7DS filter, in catalog band order. ''key'' is the FITS header-keyword token (ZP05M<key>,
+#     UL5EM<key>, BRMSM<key>), 1-3 of A-Z/0-9 and unique.'}
+# - {source: /lyman/data1/7DS/RIS/config/Filter_transmission}
+# schema: astropy-2.0
+name kind lambda_pivot_nm fwhm_nm key
+u broad 371.43 21.9 U
+g broad 479.39 141.6 G
+r broad 616.19 135.3 R
+i broad 758.73 79.7 I
+z broad 876.59 66.2 Z
+m375w wide 382.37 24.9 37W
+m386 medium 387.51 24.7 386
+m400 medium 401.32 24.2 400
+m425 medium 425.5 24.1 425
+m425w wide 427.22 47.7 42W
+m438 medium 438.31 28.4 438
+m450 medium 450.78 24.5 450
+m466w wide 467.68 43.8 46W
+m475 medium 475.27 24.0 475
+m483 medium 482.53 33.7 483
+m500 medium 500.3 25.3 500
+m512 medium 511.93 28.2 512
+m525 medium 524.84 25.1 525
+m534 medium 533.77 22.3 534
+m550 medium 550.08 24.5 550
+m561 medium 560.89 19.4 561
+m575 medium 574.87 24.6 575
+m586 medium 585.88 24.5 586
+m600 medium 600.09 24.6 600
+m615 medium 614.87 23.3 615
+m625 medium 624.78 24.2 625
+m640 medium 639.53 17.5 640
+m650 medium 650.08 25.2 650
+m661 medium 660.67 22.8 661
+m675 medium 674.46 25.9 675
+m692w wide 690.6 47.2 69W
+m700 medium 699.93 24.1 700
+m710w wide 708.41 42.6 71W
+m725 medium 724.63 24.2 725
+m750 medium 748.88 24.4 750
+m769w wide 767.57 43.2 76W
+m775 medium 775.24 23.8 775
+m800 medium 799.22 25.3 800
+m825 medium 823.97 24.9 825
+m832w wide 829.98 40.0 83W
+m850 medium 848.29 25.1 850
+m875 medium 872.85 24.2 875

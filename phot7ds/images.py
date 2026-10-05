@@ -1,9 +1,11 @@
 """
 Image organisation and mask generation.
 
-* :func:`organize_images_by_filter` groups a flat list of science image paths
-  by filter name (read from the FITS header or the filename) using a band
-  dictionary as the master order. Optionally deduplicates within a band.
+* :func:`identify_image_filter` names an image's filter (``FILTER`` card,
+  else the filename); :func:`select_images_by_filter` keeps the images whose
+  filter is in a given list (the filter registry), optionally one per filter,
+  and reports the rest; :func:`organize_images_by_filter` groups paths by
+  filter in that list's order.
 * :func:`build_coverage_mask` builds a coverage mask that flags pixels which
   are zero in the detection image or in any science image.
 """
@@ -12,12 +14,130 @@ from __future__ import annotations
 import logging
 import os
 import re
+from dataclasses import dataclass
 from typing import Literal, Sequence
 
 import numpy as np
 from astropy.io import fits
 
 log = logging.getLogger(__name__)
+
+
+#: Reasons recorded for an image left out of the measurement set.
+DROP_UNKNOWN_FILTER = "unknown_filter"
+DROP_NOT_IN_REGISTRY = "not_in_registry"
+DROP_DUPLICATE = "duplicate"
+
+_FILTER_LIKE_RE = re.compile(r"^(?:[a-z]|m\d{3,4}w?)$", re.IGNORECASE)
+
+
+def _match_name(label: str, names: Sequence[str]) -> str | None:
+    lowered = label.strip().lower()
+    for name in names:
+        if name.lower() == lowered:
+            return name
+    return None
+
+
+@dataclass(frozen=True)
+class ImageFilter:
+    """Filter identification of one image (see :func:`identify_image_filter`).
+
+    ``band`` is the matched name from ``names`` (``None`` if unmatched);
+    ``label`` the raw filter label found; ``source`` where it came from
+    (``'header'``, ``'filename'`` or ``None``).
+    """
+
+    path: str
+    band: str | None
+    label: str | None
+    source: str | None
+
+    @property
+    def drop_reason(self) -> str | None:
+        if self.band is not None:
+            return None
+        return DROP_NOT_IN_REGISTRY if self.label else DROP_UNKNOWN_FILTER
+
+
+def identify_image_filter(
+    img_path: str,
+    names: Sequence[str],
+    filter_source: Literal["header", "filename"] = "header",
+) -> ImageFilter:
+    """Identify the filter of ``img_path`` among ``names``.
+
+    With ``filter_source='header'`` the ``FILTER`` card decides whenever it
+    is present (a value not in ``names`` is reported, not overridden by the
+    filename). Without a readable ``FILTER`` card, or with
+    ``filter_source='filename'``, the basename is split on ``_``/``.``/``-``
+    and the first token equal (case-insensitively) to one of ``names`` wins;
+    a filter-like token (``m329w``, ``y``) that is not in ``names`` is
+    reported as the label.
+    """
+    names = list(names)
+    if filter_source == "header":
+        raw = None
+        try:
+            raw = fits.getheader(img_path).get("FILTER")
+        except Exception as exc:
+            log.debug("FITS header read failed for %s: %s", img_path, exc)
+        if raw is not None and str(raw).strip():
+            label = str(raw).strip()
+            band = _match_name(label, names)
+            if band is None:
+                band = _match_name(re.split(r"[-_]", label)[0], names)
+            return ImageFilter(img_path, band, label, "header")
+
+    tokens = [t for t in re.split(r"[_.\-]", os.path.basename(img_path)) if t]
+    for tok in tokens:
+        band = _match_name(tok, names)
+        if band is not None:
+            return ImageFilter(img_path, band, tok, "filename")
+    for tok in tokens[1:]:
+        if _FILTER_LIKE_RE.match(tok):
+            return ImageFilter(img_path, None, tok, "filename")
+    return ImageFilter(img_path, None, None, None)
+
+
+def select_images_by_filter(
+    image_list: Sequence[str],
+    names: Sequence[str],
+    *,
+    deduplicate: bool = True,
+    filter_source: Literal["header", "filename"] = "header",
+) -> tuple[list[ImageFilter], list[dict[str, str | None]]]:
+    """Keep the images whose filter is in ``names``, ordered as ``names``.
+
+    Images are sorted by basename within a filter; with ``deduplicate`` only
+    the first one per filter is kept. Returns ``(kept, dropped)``, where each
+    dropped entry is ``{"image", "filter", "reason"}`` with ``reason`` one of
+    ``unknown_filter`` (no filter found), ``not_in_registry`` (a filter not in
+    ``names``) or ``duplicate`` (``filter`` then names the kept image's band
+    and ``kept`` the kept image).
+    """
+    order = {name: i for i, name in enumerate(names)}
+    ids = [identify_image_filter(p, names, filter_source) for p in image_list]
+    dropped: list[dict[str, str | None]] = [
+        {"image": str(f.path), "filter": f.label, "reason": f.drop_reason}
+        for f in ids if f.band is None
+    ]
+    known = sorted(
+        (f for f in ids if f.band is not None),
+        key=lambda f: (order[f.band], os.path.basename(f.path), f.path),
+    )
+    kept: list[ImageFilter] = []
+    first: dict[str, ImageFilter] = {}
+    for f in known:
+        if deduplicate and f.band in first:
+            dropped.append({
+                "image": str(f.path), "filter": f.band, "reason": DROP_DUPLICATE,
+                "kept": str(first[f.band].path),
+            })
+            continue
+        first.setdefault(f.band, f)
+        kept.append(f)
+    return kept, dropped
 
 
 def organize_images_by_filter(
@@ -37,8 +157,9 @@ def organize_images_by_filter(
         Mapping ``{filter_name: central_wavelength}``. The *order* of keys
         in this dict defines the output order (see :func:`get_filter_definitions`).
     filter_source
-        ``'header'`` reads the ``FILTER`` FITS keyword; ``'filename'`` infers
-        from the path.
+        ``'header'`` reads the ``FILTER`` FITS keyword (falling back to the
+        filename when absent); ``'filename'`` uses the basename only. See
+        :func:`identify_image_filter`.
     output_form
         - ``'dict'``: ``{filter: path | [paths] | None}``. Missing filters
           carry ``None``. Duplicates collapse based on ``keep_duplicates``.
@@ -47,52 +168,23 @@ def organize_images_by_filter(
         For ``output_form='dict'`` only. If False, only the first sorted path
         per filter is kept (single string instead of a list).
 
+    Images whose filter is not in ``bands_dict`` are left out (logged at
+    INFO); use :func:`select_images_by_filter` to get them back with reasons.
+
     Returns
     -------
     dict or list
         See ``output_form``.
     """
     filter_order = list(bands_dict.keys())
+    kept, dropped = select_images_by_filter(
+        image_list, filter_order, deduplicate=False, filter_source=filter_source,
+    )
+    for d in dropped:
+        log.info("Image without a known filter (%s): %s", d["filter"] or "none", d["image"])
     image_filter_map: dict[str, list[str]] = {}
-
-    for img_path in image_list:
-        filter_name: str | None = None
-
-        if filter_source == "header":
-            try:
-                hdr = fits.getheader(img_path)
-                raw = hdr.get("FILTER", None)
-                if raw:
-                    filter_name = raw.replace("-", "_").strip()
-            except Exception as exc:
-                log.debug("FITS header read failed for %s: %s", img_path, exc)
-
-        if filter_name is None or filter_source == "filename":
-            for band in filter_order:
-                pattern = r"(?:^|[/_])" + re.escape(band) + r"(?:[/_]|$)"
-                if re.search(pattern, img_path, re.IGNORECASE):
-                    filter_name = band
-                    break
-            if filter_name is None:
-                match = re.search(r"[/_]([gm]\d+)[/_]", img_path, re.IGNORECASE)
-                if match:
-                    extracted = match.group(1).lower()
-                    if extracted.startswith("m"):
-                        num = re.search(r"\d+", extracted)
-                        if num:
-                            filter_name = f"m{num.group()}"
-                    elif extracted in ("g", "r", "i"):
-                        filter_name = extracted
-
-        if filter_name is None:
-            filter_name = "UNKNOWN"
-        filter_base = filter_name.split("_")[0]
-        if filter_base in filter_order:
-            filter_name = filter_base
-        elif filter_name not in filter_order:
-            filter_name = "UNKNOWN"
-
-        image_filter_map.setdefault(filter_name, []).append(img_path)
+    for f in kept:
+        image_filter_map.setdefault(f.band, []).append(f.path)
 
     if output_form == "dict":
         result: dict[str, str | list[str] | None] = {}
@@ -152,11 +244,14 @@ def extract_band_names_and_saturation(
     sciimgs: Sequence[str],
     default_saturation: float = 10000,
     saturation_keywords: Sequence[str] = SATURATION_KEYWORDS,
+    bands: Sequence[str] | None = None,
 ) -> tuple[list[str], list[float]]:
     """Extract per-image filter names and saturation values from FITS headers.
 
-    Duplicate filter names get index suffixes (``-1``, ``-2``, ...) so SE++
-    column names stay unique.
+    ``bands`` (1:1 with ``sciimgs``, e.g. the registry names found by
+    :func:`select_images_by_filter`) replaces the ``FILTER`` card as the band
+    name. Duplicate filter names get index suffixes (``-1``, ``-2``, ...) so
+    SE++ column names stay unique.
 
     Returns
     -------
@@ -167,9 +262,11 @@ def extract_band_names_and_saturation(
         (``SATURATE``, then ``SATLV``) present in the header, else
         ``default_saturation`` (with a warning).
     """
+    if bands is not None and len(bands) != len(sciimgs):
+        raise ValueError(f"bands has {len(bands)} entries for {len(sciimgs)} images")
     band_names_raw: list[str] = []
     saturation_values: list[float] = []
-    for img in sciimgs:
+    for j, img in enumerate(sciimgs):
         try:
             hdr = fits.getheader(img)
             band = str(hdr.get("FILTER", "UNKNOWN")).replace("-", "_")
@@ -177,6 +274,8 @@ def extract_band_names_and_saturation(
         except Exception:
             band = "UNKNOWN"
             saturation = None
+        if bands is not None:
+            band = bands[j]
         if saturation is None:
             log.warning(
                 "No saturation keyword (%s) in %s; using %g",
@@ -379,6 +478,12 @@ def build_coverage_mask(
 
 
 __all__ = [
+    "DROP_DUPLICATE",
+    "DROP_NOT_IN_REGISTRY",
+    "DROP_UNKNOWN_FILTER",
+    "ImageFilter",
+    "identify_image_filter",
+    "select_images_by_filter",
     "organize_images_by_filter",
     "extract_band_names_and_saturation",
     "extract_gain_values",

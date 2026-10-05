@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "phot7ds"
-version = "0.8.2"
+version = "0.9.0"
 description = "Multi-band photometric catalog pipeline for the 7DS survey (RIS / WFS / IMS)"
 readme = "README.md"
 license = { text = "MIT" }
@@ -26,6 +26,7 @@ dependencies = [
     "matplotlib",
     "requests",
     "pyvo",
+    "pyarrow",
 ]
 
 [project.optional-dependencies]
@@ -41,6 +42,7 @@ where = ["."]
 include = ["phot7ds*"]
 
 [tool.setuptools.package-data]
+"phot7ds" = ["data/*.ecsv"]
 "phot7ds.vac" = ["data/*.dat"]
 
 [tool.pytest.ini_options]

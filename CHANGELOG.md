@@ -4,6 +4,73 @@ All notable changes to `phot7ds`. Versions follow
 [semantic versioning](https://semver.org/) loosely: the minor number moves on
 new features or behaviour changes, the patch number on fixes.
 
+## v0.9.0 — 2026-10-05
+
+The 7DS filter set grows from 23 to 42 (adds `u`, `z`, 10 new medium bands
+and 7 wide `m###w` bands). phot7ds now reads its filters from one registry
+file, says which input images it did not measure and why, writes Parquet
+when a catalog outgrows FITS's 999 columns, and gives the wide filters
+their own header keys. Catalogs of the 23 original bands keep their column
+names and header keys.
+
+### Added
+
+- **Filter registry** `phot7ds/data/filters_7ds.ecsv`: the one place that
+  lists the filters (`name`, `kind` broad/medium/wide, pivot wavelength,
+  FWHM, header `key`), built from
+  `/lyman/data1/7DS/RIS/config/Filter_transmission/*.csv` by
+  `python -m phot7ds.filters <curve dir> <out.ecsv>`. Loaded by
+  `phot7ds.load_filter_registry()`, which rejects duplicate names or keys and
+  keys that would not fit an 8-character FITS keyword. Point
+  `PhotometryConfig.filter_registry` / `$PHOT7DS_FILTER_REGISTRY` at another
+  file to use it instead.
+- **`output_format`** (`"auto"` default, `"fits"`, `"parquet"`) on
+  `PhotometryConfig` / `run_photometry`: `auto` writes FITS up to 999
+  columns and Parquet above, with a WARNING; `fits` raises above 999.
+  Applies to the raw and the final catalog (suffix follows the format).
+  Parquet keeps units, descriptions, masks and all header cards.
+  `phot7ds.read_catalog()` reads either and returns plain meta values;
+  `load_unified_catalog` and the VAC pipeline accept both.
+- Manifest: `dropped_images` (`image`, `filter`, `reason`), `input_images`,
+  `uncalibrated_bands`, `filter_registry` (path, size, the run's header
+  keys), `catalog_path`, `catalog_format`, `catalog_columns`,
+  `raw_catalog_path`.
+- Header: `FILTREG`, `NFILTREG`, `NDROPIMG`, `UNCALBND`.
+- `phot7ds.identify_image_filter` / `select_images_by_filter` (filter ID and
+  selection with drop reasons), `write_catalog`, `catalog_nrows`,
+  `resolve_output_format`.
+- New dependency: `pyarrow`.
+
+### Changed — behaviour worth knowing about before you re-run
+
+- **No silent drops.** Images were matched to filters by a filename regex
+  that knew only `g r i` and `m400`–`m875`; anything else (`m386`,
+  `m425w`, ...) was dropped without a message. Now the `FILTER` header card
+  decides (the filename's `_<filter>_` token only when the card is
+  missing); images with no filter or a filter outside the registry are
+  dropped with a WARNING and recorded, and the run stops only if nothing is
+  left. `deduplicate_by_filter` stays (default `True`, alphabetically first
+  basename kept) and its drops are recorded too. Images are measured in
+  registry order.
+- **Header keys come from the registry** (`key` column). Wide bands get
+  `<first two digits>W`: `m425w` -> `ZP05M42W`, where it used to write
+  `ZP05M425` over `m425`'s card. A keyword produced by two bands raises.
+  Duplicates of one filter (`m425-1`) get `425-1` (HIERARCH), no longer
+  `425`.
+- **`DEFAULT_BANDS` / `PhotometryConfig.bands` = all 42 registry filters**
+  (`u g r i z m375w m386 m400 m425 m425w ...`), so `standardize_catalog=True`
+  now builds 1081 columns with the defaults and is written as Parquet under
+  `output_format="auto"`. Pass `bands=` to keep a smaller schema in FITS (up
+  to 38 bands with the defaults).
+- `get_filter_definitions` / `filter_colorization` return the registry's
+  pivot wavelengths and half-FWHMs instead of nominal values (`g` 4794 Å,
+  was 4770).
+- Bands without a zero-point for some aperture (no `mag_<band>` in the
+  reference catalog) are reported in `UNCALBND`, the manifest and an
+  end-of-run WARNING instead of only a mid-run log line.
+- 7DS white stack `medium_only`: excludes the registry's broad bands
+  (`u g r i z`); wide `m###w` bands are stacked.
+
 ## v0.8.2 — 2026-10-05
 
 Detection-image gain from `EGAIN`, and tile-polygon geometry that works

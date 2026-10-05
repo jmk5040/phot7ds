@@ -27,10 +27,11 @@ def test_imports() -> None:
 def test_default_bands_order() -> None:
     from phot7ds import DEFAULT_BANDS
 
-    assert DEFAULT_BANDS[:3] == ["g", "r", "i"]
-    assert DEFAULT_BANDS[3] == "m400"
+    assert DEFAULT_BANDS[:5] == ["u", "g", "r", "i", "z"]
+    assert DEFAULT_BANDS[5:8] == ["m375w", "m386", "m400"]
     assert DEFAULT_BANDS[-1] == "m875"
-    assert len(DEFAULT_BANDS) == 23
+    assert len(DEFAULT_BANDS) == 42
+    assert DEFAULT_BANDS.index("m425") + 1 == DEFAULT_BANDS.index("m425w")
 
 
 def test_run_photometry_signature_is_keyword_only() -> None:
@@ -177,6 +178,10 @@ def test_run_photometry_kwargs_override_config(
     _fits.PrimaryHDU(data=np.ones((4, 4), dtype=np.float32)).writeto(
         str(det), overwrite=True
     )
+    sci = tmp_path / "T00001_g_coadd.fits"
+    hdu = _fits.PrimaryHDU(data=np.ones((4, 4), dtype=np.float32))
+    hdu.header["FILTER"] = "g"
+    hdu.writeto(str(sci), overwrite=True)
 
     def fake_run(*args, **kwargs):  # noqa: ANN001, ANN003
         raise RuntimeError("short-circuit")
@@ -187,10 +192,11 @@ def test_run_photometry_kwargs_override_config(
         sepp_config_file="/tmp/cfg",
         detection_threshold=1.5,
         thread_count=4,
+        mask_staging_dir="",
     )
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="short-circuit"):
         pipeline.run_photometry(
-            science_images=[],
+            science_images=[str(sci)],
             detection_image=str(det),
             reference_catalog="/tmp/r.csv",
             output_dir=str(tmp_path / "out"),

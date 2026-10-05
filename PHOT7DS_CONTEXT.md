@@ -2,7 +2,7 @@
 
 Working memory for the `phot7ds` package and the 7DS/RIS scripts around it.
 Read this first when starting a new session. Version at time of writing:
-**phot7ds 0.8.2** (`phot7ds/__init__.py`, `pyproject.toml`).
+**phot7ds 0.9.0** (`phot7ds/__init__.py`, `pyproject.toml`).
 
 ---
 
@@ -441,7 +441,35 @@ From a user report (`RIS/bin/phot7ds_claim*.png`, items 2 and 6):
   `proj_plane_pixel_scales` (PC + `CDELT1 = 1` headers read 3600″/pix).
 - Report items 1 (new 41-filter set), 3–5 deferred; item 1 targeted at v0.9.
 
+## 9h. Recent changes (2026-10-05, v0.9.0) — 42-filter set
+
+- **Filter registry** `phot7ds/data/filters_7ds.ecsv` (42 rows: name, kind,
+  pivot, FWHM, header key) is the single source for filters; built from
+  `RIS/config/Filter_transmission/*.csv` with `python -m phot7ds.filters`.
+  `filters.py` (`DEFAULT_BANDS`, `get_filter_definitions`),
+  `photconv.filter_colorization`, `depth` header keys and
+  `sevends medium_only` all read it. Override: `PhotometryConfig.filter_registry`
+  or `$PHOT7DS_FILTER_REGISTRY`. Header-key rule for new rows
+  (`filters.default_header_key`): `g`→`G`, `m425`→`425`, `m425w`→`42W`.
+- Not migrated on purpose: `vac.config.DEFAULT_MEDIUM_BANDS` (legacy 20
+  bands). It only picks the crossmatch dedup band (`medium_bands[mid]` ≈
+  `m650`); switching it to the registry would move that band.
+- Image selection (`images.select_images_by_filter`): `FILTER` card first,
+  filename token as fallback, registry gate, optional dedup; every drop is a
+  WARNING plus `dropped_images` in the manifest. Run raises only when none left.
+- `catalog_io`: `output_format` auto/fits/parquet (999-column limit), suffix
+  follows the format, stale other-format sibling removed; `read_catalog()`
+  normalises Parquet `(value, comment)` meta. Schema with all 42 bands is
+  1081 columns → Parquet under auto.
+- `UNCALBND` / manifest `uncalibrated_bands` for bands without a ZP (e.g.
+  the Gaia XP synphot reference lacks the 14 new filters: m386 m438 m466w
+  m483 m534 m561 m586 m615 m640 m661 m692w m710w m769w m832w). The
+  reference-catalog location for the new filters is still to be updated by
+  the user.
+
 ## 10. Open / possible next steps
+
+- Gaia XP reference with the 14 new filters (location TBD by the user).
 
 - Consider lowering `fill_delve_detection_gaps` default overlap for *full*
   rebuilds (overlap 0.5 → 192 patches for an IMS tile; fine for gap-fill, heavy

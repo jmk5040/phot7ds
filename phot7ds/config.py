@@ -44,7 +44,12 @@ class PhotometryConfig:
     # --- Required ---
     sepp_config_file: str = ""
 
-    # --- Schema ---
+    # --- Filters / schema ---
+    # Filter registry ECSV (see phot7ds.filters); "" -> $PHOT7DS_FILTER_REGISTRY
+    # or the packaged file. Images whose filter is not in it are dropped.
+    filter_registry: str = ""
+    # Bands of the standardized (unified) schema; defaults to every filter in
+    # the registry loaded at import.
     bands: tuple[str, ...] = tuple(DEFAULT_BANDS)
     apertures: tuple[str, ...] = ("aper05", "aper10", "auto")
     detection_label: str = "DELVE"
@@ -93,6 +98,11 @@ class PhotometryConfig:
     mask_staging_dir: str = "/dev/shm"
     mask_workers: int = 8
     mask_flag_type: str = "or"
+
+    # --- Output ---
+    # "auto": FITS when the final table fits in 999 columns, else Parquet;
+    # "fits" (error above 999 columns) or "parquet" to force one.
+    output_format: str = "auto"
 
     # --- Diagnostics ---
     save_residual_plots: bool = False

@@ -3,8 +3,8 @@ Single-image-set photometry pipeline.
 
 The public entry point is :func:`run_photometry`. It takes a list of science
 image paths, a detection image, a SourceExtractor++ config and a reference
-catalog, and writes a single zero-point-calibrated FITS catalog plus a run
-log to ``output_dir``.
+catalog, and writes a single zero-point-calibrated catalog (FITS, or Parquet
+above the FITS 999-column limit) plus a run log to ``output_dir``.
 
 All tuning knobs are keyword-only arguments with sensible defaults. For
 convenience you may bundle settings into a :class:`PhotometryConfig` and
@@ -35,13 +35,20 @@ from .depth import (
     format_depth_table,
     zeropoints_to_meta,
 )
-from .filters import DEFAULT_BANDS, get_filter_definitions
+from .catalog_io import (
+    catalog_format_of,
+    catalog_nrows,
+    find_existing_catalog,
+    strip_catalog_suffix,
+    write_catalog,
+)
+from .filters import FilterRegistry, load_filter_registry
 from .images import (
     build_coverage_mask,
     extract_band_names_and_saturation,
     extract_gain_values,
-    organize_images_by_filter,
     read_detection_gain,
+    select_images_by_filter,
 )
 from .masks import (
     MASKBIT,
@@ -79,10 +86,12 @@ class PhotometryResult:
     Attributes
     ----------
     catalog_path
-        Path to the final zero-point-calibrated FITS catalog. The basename
-        is whatever the user supplied (only ``.fits`` is enforced); for
-        example ``test_zp.fits`` stays ``test_zp.fits``. The raw SE++
-        output is written alongside it as ``{run_name}_raw.fits``.
+        Path to the final zero-point-calibrated catalog. The basename is
+        whatever the user supplied, with the suffix of the format actually
+        written (``.fits``, or ``.parquet`` when the table exceeds the FITS
+        999-column limit; see ``output_format``); for example
+        ``test_zp.fits`` stays ``test_zp.fits``. The raw SE++ output is
+        written alongside it as ``{run_name}_raw.fits`` (or ``.parquet``).
     manifest_path
         Path to a JSON file recording the inputs used.
     log_file
@@ -124,19 +133,21 @@ def _normalize_catalog_basename(name: str) -> str:
     Behaviour
     ---------
     * Path components in ``name`` are stripped (only the leaf is kept).
-    * If ``name`` ends in ``.fits`` it is used verbatim. The caller's
-      choice of suffix (``test_zp.fits``, ``my_run.fits``, ...) is
-      respected and **not** rewritten to ``_phot.zp.fits``.
+    * If ``name`` ends in ``.fits`` or ``.parquet`` it is used verbatim. The
+      caller's choice of name (``test_zp.fits``, ``my_run.fits``, ...) is
+      respected and **not** rewritten to ``_phot.zp.fits``. The suffix is
+      swapped at write time if the resolved ``output_format`` differs.
     * Otherwise ``name`` is treated as a stem and ``.fits`` is appended.
 
     Examples
     --------
     ``T01_20260512_DELVE`` -> ``T01_20260512_DELVE.fits``
     ``test_zp.fits``       -> ``test_zp.fits``
+    ``test_zp.parquet``    -> ``test_zp.parquet``
     ``test_zp``            -> ``test_zp.fits``
     """
     leaf = Path(name).name
-    if leaf.lower().endswith(".fits"):
+    if leaf.lower().endswith((".fits", ".parquet")):
         return leaf
     return f"{leaf}.fits"
 
@@ -144,24 +155,21 @@ def _normalize_catalog_basename(name: str) -> str:
 def _stem_from_catalog_basename(basename: str) -> str:
     """Derive ``run_name`` stem from a normalised catalog basename.
 
-    Strips the ``.fits`` extension. Any earlier ``_phot.zp`` / ``.zp``
-    suffixes are kept as part of the stem so intermediate files inherit
-    the user's filename intent.
+    Strips the ``.fits`` / ``.parquet`` extension. Any earlier ``_phot.zp``
+    / ``.zp`` suffixes are kept as part of the stem so intermediate files
+    inherit the user's filename intent.
     """
-    leaf = Path(basename).name
-    if leaf.lower().endswith(".fits"):
-        return leaf[:-5]
-    return leaf
+    return strip_catalog_suffix(Path(basename).name)
 
 
 def _normalize_catalog_path(catalog_path: str | Path) -> Path:
     """Return the final calibrated-catalog path (full path).
 
-    Accepts a path that already ends in ``.fits``, or a stem (``.fits``
-    is then appended).
+    Accepts a path that already ends in ``.fits`` or ``.parquet``, or a
+    stem (``.fits`` is then appended).
     """
     p = Path(catalog_path)
-    if p.name.lower().endswith(".fits"):
+    if p.name.lower().endswith((".fits", ".parquet")):
         return p
     return p.with_name(f"{p.name}.fits")
 
@@ -178,7 +186,8 @@ def _resolve_output_paths(
     """Return work_dir, raw_catalog, zp_catalog, log, manifest, run_name.
 
     The raw SE++ output is written as ``{run_name}_raw.fits`` next to the
-    final calibrated catalog so the two are easy to tell apart.
+    final calibrated catalog so the two are easy to tell apart (rewritten
+    as ``.parquet`` after the column split when it exceeds the FITS limit).
     """
     if catalog_path is not None and catalog_name is not None:
         raise ValueError("Pass only one of catalog_path or catalog_name, not both.")
@@ -274,6 +283,9 @@ def _annotate_catalog_meta(
     gain_values: Sequence[float] | None = None,
     saturation_values: Sequence[float] | None = None,
     detection_gain: float | None = None,
+    filter_registry: FilterRegistry | None = None,
+    n_dropped_images: int | None = None,
+    uncalibrated_bands: Sequence[str] | None = None,
 ) -> None:
     """Inject high-value run-time metadata into ``meta`` (in place).
 
@@ -289,6 +301,11 @@ def _annotate_catalog_meta(
     ``band_masks`` (per-band bitmask provenance, see :mod:`phot7ds.masks`)
     adds ``MB<name>`` bit definitions, ``NBANDMSK``/``NCNTMSK`` counts and one
     ``MSKnnn`` card per band (``<band>:<count MEF>`` or ``<band>:coverage-only``).
+
+    ``filter_registry`` adds ``FILTREG`` (registry file) and ``NFILTREG``;
+    ``n_dropped_images`` adds ``NDROPIMG`` (images left out, listed in the
+    manifest); ``uncalibrated_bands`` adds ``UNCALBND`` (comma list of bands
+    lacking a zero-point for at least one aperture).
     """
     # Lazy version lookup avoids a circular import.
     try:
@@ -332,6 +349,19 @@ def _annotate_catalog_meta(
     meta["NSCIIMG"] = (
         int(len(science_images)), "Number of measurement (science) images"
     )
+    if filter_registry is not None:
+        meta["FILTREG"] = (
+            Path(filter_registry.source).name[:60], "phot7ds filter registry file"
+        )
+        meta["NFILTREG"] = (len(filter_registry), "Filters in the filter registry")
+    if n_dropped_images is not None:
+        meta["NDROPIMG"] = (
+            int(n_dropped_images), "Input images dropped (see manifest)"
+        )
+    if uncalibrated_bands:
+        meta["UNCALBND"] = (
+            ",".join(uncalibrated_bands)[:68], "Bands lacking a zero-point"
+        )
     # Record each science image's basename (SCIMGnnn) and its observation
     # date (DATE-nnn, from the image's DATE-OBS), plus an exposure-averaged
     # DATE-OBS / MJD-OBS over all science images.
@@ -467,6 +497,9 @@ def run_photometry(
     standardize_catalog: bool = False,
     # --- Optional config bundle ---
     config: PhotometryConfig | None = None,
+    # --- Filters / output (override config) ---
+    filter_registry: str | None = None,
+    output_format: str | None = None,
     # --- Schema / labelling (override config) ---
     bands: Sequence[str] | None = None,
     apertures: Sequence[str] | None = None,
@@ -518,8 +551,11 @@ def run_photometry(
     ----------
     science_images
         List of 7DS science (measurement) image paths. The ``FILTER`` FITS
-        header keyword identifies the band of each image. The list order is
-        irrelevant; images are reorganised internally by filter.
+        header keyword identifies the band of each image (the filename's
+        ``_<filter>_`` token when the card is missing). Only filters in the
+        filter registry are measured; any other image is dropped with a
+        WARNING and listed under ``dropped_images`` in the manifest. The list
+        order is irrelevant; images are reordered by registry order.
     detection_image
         Detection FITS image (built externally; see
         :mod:`phot7ds.detection`). The gain is read from ``EGAIN`` (7DS
@@ -536,7 +572,8 @@ def run_photometry(
         ``output_dir``. Examples: ``test_zp.fits``,
         ``T01234_20260512_DELVE.fits``, ``T01234_20260512_DELVE`` (the
         ``.fits`` extension is appended when missing). The leaf is kept
-        verbatim -- there is no forced ``_phot.zp.fits`` suffix.
+        verbatim -- there is no forced ``_phot.zp.fits`` suffix -- except
+        that the suffix follows the format written (``output_format``).
     catalog_path
         Alternative to ``catalog_name``: full path to the final catalog
         (``.fits`` appended if absent). Its parent directory is created
@@ -572,26 +609,41 @@ def run_photometry(
         Basename stem for intermediate files (log, mask, raw catalog).
         Defaults to ``{detection_stem}_{detection_label}`` when neither
         ``catalog_name`` nor ``catalog_path`` is supplied, otherwise to
-        the chosen filename without its ``.fits`` extension. The raw
-        SE++ catalog is always saved as ``{run_name}_raw.fits``.
+        the chosen filename without its ``.fits``/``.parquet`` extension.
+        The raw SE++ catalog is saved as ``{run_name}_raw.fits`` (or
+        ``_raw.parquet``, following ``output_format``).
     overwrite
-        If False and the final catalog already exists, the run is skipped
-        and the existing files are summarised.
+        If False and the final catalog already exists (as ``.fits`` or
+        ``.parquet``), the run is skipped and the existing files are
+        summarised.
     deduplicate_by_filter
-        If True (default), keep only one science image per filter (sorted by
-        filename). Set to False to register every image with SE++ as-is.
+        If True (default), keep only one science image per filter (the
+        alphabetically first basename); the others are dropped with a
+        WARNING and listed in the manifest (reason ``duplicate``). Set to
+        False to measure every image (duplicates get ``-N`` band suffixes).
     max_measurement_images
         Hard cap on the number of science images. When the post-dedup count
         exceeds this, :class:`ValueError` is raised. ``None`` disables the
         check.
     standardize_catalog
         If ``True``, reshape the table to the canonical column schema via
-        :func:`~phot7ds.schema.standardize_catalog` before writing the FITS
-        output. Default ``False`` (write SE++ + calibration columns as-is).
+        :func:`~phot7ds.schema.standardize_catalog` before writing the
+        output. The schema covers ``bands`` (default: every registry filter,
+        which exceeds 999 columns, so ``output_format='auto'`` writes
+        Parquet). Default ``False`` (write SE++ + calibration columns as-is).
     config
         Optional :class:`PhotometryConfig` bundling the tuning knobs. Any
         explicit keyword argument always overrides the corresponding
         ``config`` field.
+    filter_registry
+        Filter registry ECSV (see :mod:`phot7ds.filters`). Default:
+        ``$PHOT7DS_FILTER_REGISTRY``, else the packaged 7DS registry.
+    output_format
+        ``'auto'`` (default): FITS when the table has <= 999 columns, else
+        Parquet (with a WARNING); ``'fits'`` (error above 999 columns) or
+        ``'parquet'`` to force one. Applies to the raw and the final
+        catalog; the manifest records ``catalog_format``. Read either with
+        :func:`phot7ds.read_catalog`.
     bands, apertures, detection_label, coverage_mask_max_fraction
         Schema / labelling overrides.
     per_band_masks, count_mask_suffix, mask_use_nused, mask_staging_dir,
@@ -650,9 +702,10 @@ def run_photometry(
 
     configure_logging(log_file=log_file)
 
-    if not overwrite and zp_catalog_path.exists():
-        log.info("Final catalog already exists, skipping: %s", zp_catalog_path)
-        return _summarise_existing(zp_catalog_path, manifest_path, log_file)
+    existing = find_existing_catalog(zp_catalog_path)
+    if not overwrite and existing is not None:
+        log.info("Final catalog already exists, skipping: %s", existing)
+        return _summarise_existing(existing, manifest_path, log_file)
 
     log.info("=== phot7ds run: %s ===", run_name)
     provenance = collect_provenance()
@@ -660,8 +713,10 @@ def run_photometry(
     log.info("Detection image: %s", detection_image)
     log.info("Science images : %d", len(science_images))
 
-    sciimgs = _select_measurement_images(
-        science_images, deduplicate=deduplicate_by_filter
+    registry = load_filter_registry(cfg.filter_registry or None)
+    log.info("Filter registry: %s (%d filters)", registry.source, len(registry))
+    sciimgs, sciimg_bands, dropped_images = _select_measurement_images(
+        science_images, registry=registry, deduplicate=deduplicate_by_filter
     )
     if max_measurement_images is not None and len(sciimgs) > max_measurement_images:
         raise ValueError(
@@ -706,7 +761,10 @@ def run_photometry(
             except Exception:
                 mask_ratio = None
 
-        band_names, saturation_values = extract_band_names_and_saturation(sciimgs)
+        band_names, saturation_values = extract_band_names_and_saturation(
+            sciimgs, bands=sciimg_bands
+        )
+        band_keys = registry.header_keys(band_names)
         gain_values = extract_gain_values(sciimgs)
         log.info("Per-image bands: %s", band_names)
         log.info(
@@ -802,11 +860,15 @@ def run_photometry(
             str(raw_catalog_path),
             band_names=band_names,
             flux_fractions=cfg.flux_fractions,
-            overwrite=True,
+            overwrite=False,
             fixed_apertures=list(cfg.fixed_apertures_arcsec),
         )
         if cat is None:
             raise RuntimeError("SE++ catalog could not be loaded for post-processing")
+        raw_catalog_path = write_catalog(
+            cat, raw_catalog_path, cfg.output_format, remove_stale=True,
+        )
+        log.info("Wrote split raw catalog: %s", raw_catalog_path)
         if band_masks:
             renamed = rename_mask_columns(cat, list(band_masks))
             log.info("Per-band mask columns: %d (%s ...); bits %s", len(renamed),
@@ -842,7 +904,18 @@ def run_photometry(
             cat.meta,
             cat.meta.get("zeropoints"),
             cat.meta.get("zeropoint_scatter"),
+            band_keys=band_keys,
         )
+        uncalibrated = _uncalibrated_bands(
+            cat.meta.get("zeropoints"), band_names, cfg.apertures,
+        )
+        if uncalibrated:
+            log.warning(
+                "No zero-point for %d band(s): %s. Their magnitudes are "
+                "uncalibrated (check the reference catalog's mag_<band> columns).",
+                len(uncalibrated),
+                ", ".join(f"{b} ({'/'.join(a)})" for b, a in uncalibrated.items()),
+            )
 
         depth_results: dict = {}
         if cfg.estimate_depth:
@@ -873,6 +946,7 @@ def run_photometry(
                 )
                 depth_results_to_meta(
                     cat.meta, depth_results, n_sigma=cfg.depth_n_sigma,
+                    band_keys=band_keys,
                 )
 
         strip_nonfits_units(cat)
@@ -897,10 +971,16 @@ def run_photometry(
             gain_values=gain_values,
             saturation_values=saturation_values,
             detection_gain=det_gain,
+            filter_registry=registry,
+            n_dropped_images=len(dropped_images),
+            uncalibrated_bands=list(uncalibrated),
         )
         if standardize_catalog:
+            schema_bands = cfg.bands
+            if cfg.filter_registry and tuple(cfg.bands) == PhotometryConfig().bands:
+                schema_bands = registry.names
             schema = build_canonical_schema(
-                bands=cfg.bands,
+                bands=schema_bands,
                 apertures=cfg.apertures,
                 flux_fractions=cfg.flux_fractions,
                 per_band_masks=bool(band_masks),
@@ -913,7 +993,10 @@ def run_photometry(
                 cat.meta.get("NDUPS", 0),
                 cat.meta.get("NEXTRA", 0),
             )
-        cat.write(str(zp_catalog_path), format="fits", overwrite=True)
+        zp_catalog_path = write_catalog(
+            cat, zp_catalog_path, cfg.output_format, remove_stale=True,
+        )
+        catalog_format = catalog_format_of(zp_catalog_path)
 
         manifest = {
             "run_name": run_name,
@@ -926,6 +1009,18 @@ def run_photometry(
             "mask_ratio": mask_ratio,
             "badpix_mask": str(badpix_mask) if badpix_mask else None,
             "reference_catalog": str(reference_catalog),
+            "catalog_path": str(zp_catalog_path),
+            "catalog_format": catalog_format,
+            "catalog_columns": len(cat.colnames),
+            "raw_catalog_path": str(raw_catalog_path),
+            "filter_registry": {
+                "path": registry.source,
+                "n_filters": len(registry),
+                "header_keys": band_keys,
+            },
+            "input_images": [str(p) for p in science_images],
+            "dropped_images": dropped_images,
+            "uncalibrated_bands": uncalibrated,
             "science_images": list(sciimgs),
             "measurement_images": [
                 {"band": band, "image": str(img), "gain": gain, "saturation": sat}
@@ -958,7 +1053,15 @@ def run_photometry(
         with open(manifest_path, "w") as f:
             json.dump(manifest, f, indent=2)
 
-        log.info("Wrote calibrated catalog: %s", zp_catalog_path)
+        log.info("Wrote calibrated catalog: %s (%s, %d columns)",
+                 zp_catalog_path, catalog_format, len(cat.colnames))
+        if dropped_images:
+            log.warning(
+                "%d input image(s) were not measured; see dropped_images in %s",
+                len(dropped_images), manifest_path,
+            )
+        if uncalibrated:
+            log.warning("Uncalibrated bands: %s", ", ".join(uncalibrated))
     finally:
         staging.cleanup()
 
@@ -1000,47 +1103,71 @@ def _merge_config(
 
 
 def _select_measurement_images(
-    science_images: Sequence[str], *, deduplicate: bool
-) -> list[str]:
-    """Optionally deduplicate the science image list by filter.
+    science_images: Sequence[str],
+    *,
+    registry: FilterRegistry,
+    deduplicate: bool,
+) -> tuple[list[str], list[str], list[dict[str, str | None]]]:
+    """Measurement images, their registry bands, and the dropped images.
 
-    7DS surveys can produce multiple coadds per filter (different epochs);
-    by default this helper keeps one representative image per filter. If the
-    filter cannot be inferred for any image, the caller's original list is
-    returned unchanged.
+    Each image's filter comes from its ``FILTER`` card (the filename when
+    the card is missing). Images with no filter or a filter outside the
+    registry are dropped; with ``deduplicate`` 7DS's multiple coadds per
+    filter (different epochs) reduce to the alphabetically first basename.
+    Every drop is logged as a WARNING and returned for the manifest.
     """
-    if not deduplicate:
-        return list(science_images)
-    bands_dict, *_ = get_filter_definitions(unit="angstrom")
-    dict_sciimgs = organize_images_by_filter(
-        science_images,
-        bands_dict,
-        filter_source="filename",
-        output_form="dict",
-        keep_duplicates=False,
+    kept, dropped = select_images_by_filter(
+        science_images, registry.names, deduplicate=deduplicate,
     )
-    selected = [v for v in dict_sciimgs.values() if isinstance(v, str)]
-    if not selected:
-        return list(science_images)
-    if len(selected) != len(science_images):
-        log.info(
-            "Deduplicated science images: %d -> %d",
-            len(science_images),
-            len(selected),
+    for d in dropped:
+        if d["reason"] == "duplicate":
+            log.warning("Dropped %s: duplicate %s image (kept %s)",
+                        d["image"], d["filter"], Path(d["kept"]).name)
+        elif d["reason"] == "not_in_registry":
+            log.warning("Dropped %s: filter %r is not in the filter registry (%s)",
+                        d["image"], d["filter"], registry.source)
+        else:
+            log.warning("Dropped %s: no FILTER card and no filter token in the name",
+                        d["image"])
+    if not kept:
+        raise ValueError(
+            f"None of the {len(science_images)} science images has a filter in the "
+            f"filter registry ({registry.source}); see the WARNINGs above."
         )
-    return selected
+    if dropped:
+        log.info("Measurement images: %d of %d inputs", len(kept), len(science_images))
+    return [f.path for f in kept], [f.band for f in kept], dropped
+
+
+def _uncalibrated_bands(
+    zeropoints: Mapping[tuple[str, str], float] | None,
+    band_names: Sequence[str],
+    apertures: Sequence[str],
+) -> dict[str, list[str]]:
+    """``{band: [apertures without a finite zero-point]}`` for incomplete bands."""
+    import math
+
+    zeropoints = zeropoints or {}
+    missing: dict[str, list[str]] = {}
+    for band in band_names:
+        apers = [
+            a for a in apertures
+            if not (isinstance(zeropoints.get((a, band)), (int, float))
+                    and math.isfinite(zeropoints[(a, band)]))
+        ]
+        if apers:
+            missing[band] = apers
+    return missing
 
 
 def _summarise_existing(
     catalog_path: Path, manifest_path: Path, log_file: Path
 ) -> PhotometryResult:
-    with fits.open(catalog_path) as hdul:
-        n = hdul[1].header.get("NAXIS2", 0)
     return PhotometryResult(
         catalog_path=str(catalog_path),
         manifest_path=str(manifest_path),
         log_file=str(log_file),
-        n_sources=int(n),
+        n_sources=catalog_nrows(catalog_path),
     )
 
 

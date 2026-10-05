@@ -15,6 +15,7 @@ from typing import Sequence
 import numpy as np
 from astropy.table import Table
 
+from ..catalog_io import read_catalog
 from ..masks import NODATA_BIT, any_band_nodata, mask_flag_columns
 from .catalog import assemble_value_added
 from .config import VACConfig
@@ -56,8 +57,8 @@ def _load_catalog(
     catalog_path: str | Path, cfg: VACConfig, *, drop_empty_bands: bool,
     apertures: Sequence[str],
 ) -> Table:
-    """Read a photometric catalog and apply the coverage / dead-band cuts."""
-    catalog = Table.read(catalog_path, format="fits")
+    """Read a photometric catalog (FITS or Parquet) and apply the coverage / dead-band cuts."""
+    catalog = read_catalog(catalog_path)
     log.info("Loaded catalog %s (%d rows).", catalog_path, len(catalog))
 
     flag_col = cfg.cover_flag_column

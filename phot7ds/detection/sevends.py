@@ -35,7 +35,6 @@ from astropy.wcs.utils import proj_plane_pixel_scales
 
 log = logging.getLogger(__name__)
 
-DEFAULT_BROAD_BANDS = ("g", "r", "i")
 MEDIUM_BAND_PREFIX = "m"
 DEFAULT_SEEING_KEYS = ("SEEING", "FWHM")
 
@@ -43,6 +42,17 @@ DEFAULT_SEEING_KEYS = ("SEEING", "FWHM")
 def _band_token(image_path: str) -> str:
     """Return the band field of a ``T#####_<band>_7DT..._coadd.fits`` name."""
     return os.path.basename(image_path).split("_")[1]
+
+
+def _is_broad_band(band: str) -> bool:
+    """``kind == 'broad'`` in the filter registry; outside it, not ``m*``."""
+    from ..filters import load_filter_registry
+
+    registry = load_filter_registry()
+    name = registry.canonical(band)
+    if name is not None:
+        return registry[name].kind == "broad"
+    return not band.lower().startswith(MEDIUM_BAND_PREFIX)
 
 
 def _seeing_value(image_path: str, seeing_keys: tuple[str, ...]) -> float | None:
@@ -144,8 +154,9 @@ def collect_band_inputs(
     unweighted ``MEDIAN`` combine) images without a weight map are kept
     too, with ``None`` in the corresponding ``weights`` slot.
 
-    When ``medium_only`` is set, broad-band images (``g``/``r``/``i``) are
-    dropped and only medium bands (``m###``) are stacked.
+    When ``medium_only`` is set, broad-band images (``kind == 'broad'`` in
+    the filter registry: ``u``/``g``/``r``/``i``/``z``) are dropped; medium
+    (``m###``) and wide (``m###w``) bands are stacked.
 
     When ``one_per_band`` is set, only a single representative image is
     kept per band: the one with the smallest (sharpest) seeing, read from
@@ -159,7 +170,7 @@ def collect_band_inputs(
     for img in sorted(glob(os.path.join(image_dir, image_glob))):
         if img.endswith(f"{weight_suffix}.fits"):
             continue  # defensive: never treat a weight map as a science image
-        if medium_only and not _band_token(img).startswith(MEDIUM_BAND_PREFIX):
+        if medium_only and _is_broad_band(_band_token(img)):
             continue
         stem, ext = os.path.splitext(img)
         wgt = f"{stem}{weight_suffix}{ext}"
@@ -243,7 +254,8 @@ def build_7ds_detection_image(
         Output image file name. Defaults to
         ``"{tile}_7DS_EDR_IMAGE_det.fits"`` (mirrors the DELVE builder).
     medium_only
-        Stack only medium bands (``m###``); skip ``g``/``r``/``i``.
+        Stack only medium and wide bands (``m###``, ``m###w``); skip the
+        registry's broad bands (``u``/``g``/``r``/``i``/``z``).
     one_per_band
         Keep a single representative image per band - the sharpest by
         seeing - instead of stacking every image in the directory. Useful

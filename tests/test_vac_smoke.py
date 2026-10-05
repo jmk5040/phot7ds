@@ -63,8 +63,8 @@ def test_filter_colorization_bands() -> None:
     from phot7ds import filter_colorization
 
     bands, widths, colors, l2c, l2b = filter_colorization(unit="angstrom")
-    assert len(bands) == 23  # g, r, i + 20 medium
-    assert "g" in bands and "m400" in bands and "m875" in bands
+    assert len(bands) == 42  # filter registry: 5 broad + 30 medium + 7 wide
+    assert "g" in bands and "m400" in bands and "m875" in bands and "m425w" in bands
     assert set(bands) == set(widths) == set(colors)
 
 

@@ -696,16 +696,27 @@ _CANONICAL_DEPTH_APERTURE = "aper05"
 _CANONICAL_DEPTH_APERTURE_TOKEN = "05"
 
 
-def _band_keyword_token(band: str) -> str:
-    """Return a FITS-keyword-friendly band suffix (1-3 chars).
+def _band_keyword_token(band: str, band_keys: Mapping[str, str] | None = None) -> str:
+    """Return a FITS-keyword-friendly band suffix.
 
-    - Broadbands ``g``/``r``/``i``/``z`` -> ``G``/``R``/``I``/``Z`` (1 char).
-    - Medium bands ``m400``..``m875`` -> just the digit string (3 chars).
-    - Anything else -> uppercased and truncated to 3 chars.
+    ``band_keys`` (``{band: key}``, see
+    :meth:`phot7ds.filters.FilterRegistry.header_keys`) wins; otherwise the
+    ``key`` column of the default filter registry (``m425`` -> ``425``,
+    ``m425w`` -> ``42W``, ``g-1`` -> ``G-1``). Bands outside the registry fall
+    back to: single letter -> upper case, ``m<digits>`` -> the first 3 digits,
+    else the first 3 upper-cased characters.
     """
     if not band:
         return "X"
     b = band.strip()
+    if band_keys and b in band_keys:
+        return band_keys[b]
+    from .filters import load_filter_registry
+
+    try:
+        return load_filter_registry().header_key(b)
+    except KeyError:
+        pass
     if len(b) == 1 and b.lower() in "griz":
         return b.upper()
     if b.lower().startswith("m"):
@@ -741,33 +752,49 @@ def _aperture_keyword_token(aperture: str) -> str:
     return aperture.upper()[:2]
 
 
-def _depth_keyword(n_sigma: int, method_letter: str, band: str) -> str:
+def _depth_keyword(
+    n_sigma: int, method_letter: str, band: str, band_keys: Mapping[str, str] | None = None,
+) -> str:
     """Build a FITS keyword for a depth value (always 5" aperture).
 
-    Returns ``UL{N}{E|R}M{BAND}`` -- always within the 8-character FITS
-    standard for the canonical 7DS bands.
+    Returns ``UL{N}{E|R}M{BAND}`` -- within the 8-character FITS standard
+    for every registry filter (keys are at most 3 characters).
     """
-    band_tok = _band_keyword_token(band)
+    band_tok = _band_keyword_token(band, band_keys)
     return f"UL{int(n_sigma)}{method_letter}M{band_tok}"
 
 
-def _sky_sigma_keyword(band: str) -> str:
+def _sky_sigma_keyword(band: str, band_keys: Mapping[str, str] | None = None) -> str:
     """Build a FITS keyword for the background RMS (sky sigma) in ADU."""
-    band_tok = _band_keyword_token(band)
+    band_tok = _band_keyword_token(band, band_keys)
     return f"BRMSM{band_tok}"
 
 
-def _zp_keyword(prefix: str, aperture: str, band: str) -> str:
+def _zp_keyword(
+    prefix: str, aperture: str, band: str, band_keys: Mapping[str, str] | None = None,
+) -> str:
     """Build a FITS keyword for a zero-point quantity (``ZP`` or ``ZE``)."""
     aper_tok = _aperture_keyword_token(aperture)
-    band_tok = _band_keyword_token(band)
+    band_tok = _band_keyword_token(band, band_keys)
     return f"{prefix}{aper_tok}M{band_tok}"
+
+
+def _set_card(meta: dict, owners: dict[str, str], key: str, card: tuple, owner: str) -> None:
+    """Set ``meta[key]``, refusing to let two bands write the same keyword."""
+    if key in owners and owners[key] != owner:
+        raise ValueError(
+            f"Header keyword {key} produced for both {owners[key]} and {owner}; "
+            "give the bands distinct keys in the filter registry"
+        )
+    owners[key] = owner
+    meta[key] = card
 
 
 def depth_results_to_meta(
     meta: dict,
     results: Mapping[tuple[str, str], Mapping[str, Mapping[str, float | int | str]]],
     n_sigma: float = 5.0,
+    band_keys: Mapping[str, str] | None = None,
 ) -> None:
     """Embed depth values as FITS-safe header keys in ``meta`` (in place).
 
@@ -784,9 +811,13 @@ def depth_results_to_meta(
 
     ``N`` reflects ``n_sigma`` (rounded to the nearest integer). The card
     value is in the unit indicated by the comment; the comment carries the
-    band metadata in human-readable form.
+    band metadata in human-readable form. ``{BAND}`` is the band's header
+    key (``band_keys``, else the filter registry; see
+    :func:`_band_keyword_token`); two bands producing the same keyword raise
+    :class:`ValueError`.
     """
     n = int(round(n_sigma))
+    owners: dict[str, str] = {}
     for (aperture, band), entry in results.items():
         if aperture != _CANONICAL_DEPTH_APERTURE:
             # Per-survey convention: only the 5" aperture appears in the
@@ -802,26 +833,27 @@ def depth_results_to_meta(
             depth = ent.get("depth", float("nan"))
             if not np.isfinite(depth):
                 continue
-            key = _depth_keyword(n, marker, band)
-            meta[key] = (
+            key = _depth_keyword(n, marker, band, band_keys)
+            _set_card(meta, owners, key, (
                 round(float(depth), 3),
                 f"{n}sig {aperture} {band} {descr} depth [mag]",
-            )
+            ), band)
         # Sky sigma in ADU (raw empty-aperture noise; useful for sanity
         # checks and downstream limit-mag recomputation with an updated ZP).
         empty = entry.get("empty") or {}
         sigma = empty.get("sky_sigma", float("nan"))
         if np.isfinite(sigma):
-            meta[_sky_sigma_keyword(band)] = (
+            _set_card(meta, owners, _sky_sigma_keyword(band, band_keys), (
                 round(float(sigma), 3),
                 f"sky sigma {aperture} {band} bkgRMS [ADU]",
-            )
+            ), band)
 
 
 def zeropoints_to_meta(
     meta: dict,
     zeropoints: Mapping[tuple[str, str], float] | None,
     zeropoint_scatter: Mapping[tuple[str, str], float] | None = None,
+    band_keys: Mapping[str, str] | None = None,
 ) -> None:
     """Embed per-(aperture, band) zero-points as FITS-safe header keys.
 
@@ -831,29 +863,32 @@ def zeropoints_to_meta(
     - ``ZE{APER}M{BAND}`` -- 1-sigma scatter (calibration RMS), if provided.
 
     Aperture tokens follow :func:`_aperture_keyword_token` (``'05'``,
-    ``'10'``, ``'AU'``, ...). Band tokens follow :func:`_band_keyword_token`
-    (``'G'``/``'R'``/``'I'``/``'Z'`` for broadbands; the 3-digit central
-    wavelength for medium-bands).
+    ``'10'``, ``'AU'``, ...). Band tokens are the bands' header keys
+    (``band_keys``, else the filter registry: ``'G'``, ``'425'``, ``'42W'``;
+    see :func:`_band_keyword_token`). Two (aperture, band) pairs producing
+    the same keyword raise :class:`ValueError`.
     """
     if not zeropoints:
         return
     scatter = zeropoint_scatter or {}
+    owners: dict[str, str] = {}
     for (aperture, band), zp in zeropoints.items():
         if zp is None or not np.isfinite(zp):
             continue
-        key_zp = _zp_keyword("ZP", aperture, band)
-        meta[key_zp] = (
+        owner = f"{aperture}/{band}"
+        key_zp = _zp_keyword("ZP", aperture, band, band_keys)
+        _set_card(meta, owners, key_zp, (
             round(float(zp), 3),
             f"ZP {aperture} {band} [mag]",
-        )
+        ), owner)
         ze = scatter.get((aperture, band))
         if ze is None or not np.isfinite(ze):
             continue
-        key_ze = _zp_keyword("ZE", aperture, band)
-        meta[key_ze] = (
+        key_ze = _zp_keyword("ZE", aperture, band, band_keys)
+        _set_card(meta, owners, key_ze, (
             round(float(ze), 3),
             f"ZP scatter {aperture} {band} [mag]",
-        )
+        ), owner)
 
 
 __all__ = [

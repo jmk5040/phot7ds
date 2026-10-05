@@ -6,10 +6,15 @@ Monitoring Survey).
 
 Given a list of 7DS science images, a detection image, a SourceExtractor++
 config and a Gaia XP synphot reference catalog, `phot7ds.run_photometry()`
-returns a single zero-point-calibrated FITS catalog. By default the table
-keeps the SE++ column layout plus calibration columns; pass
-`standardize_catalog=True` if you want the fixed canonical column order with
-placeholder columns for missing bands.
+returns a single zero-point-calibrated catalog (FITS, or Parquet when the
+table exceeds the FITS 999-column limit; see [Output format](#output-format-fits-or-parquet)).
+By default the table keeps the SE++ column layout plus calibration columns;
+pass `standardize_catalog=True` if you want the fixed canonical column order
+with placeholder columns for missing bands.
+
+The filters phot7ds knows (42: `u g r i z`, 30 medium `m###`, 7 wide
+`m###w`) and their header-key tokens are listed in one file, the
+[filter registry](#filter-registry).
 
 ## Layout
 
@@ -25,6 +30,7 @@ phot7ds/          # repository root (this package)
 │       └── column_convention.md
 ├── tests/
 │   ├── test_smoke.py                   # smoke tests (no SE++/network)
+│   ├── test_v09.py                     # filter registry, image selection, FITS/Parquet
 │   └── test_vac_smoke.py               # vac smoke tests (no eazy/sfdmap/FAST++)
 └── phot7ds/
     ├── __init__.py
@@ -32,9 +38,11 @@ phot7ds/          # repository root (this package)
     ├── config.py                       # PhotometryConfig (frozen dataclass)
     ├── config_io.py                    # ensure_* / require_* helpers
     ├── presets.py                      # per-detection-image SE++ presets
-    ├── filters.py                      # 7DS filter definitions, DEFAULT_BANDS
+    ├── filters.py                      # filter registry loader, DEFAULT_BANDS
+    ├── data/filters_7ds.ecsv           # the filter registry (42 filters, header keys)
+    ├── catalog_io.py                   # FITS / Parquet write + read_catalog()
     ├── tile_geometry.py                # tile polygon trim
-    ├── images.py                       # organise-by-filter, coverage-mask builder
+    ├── images.py                       # filter ID + selection, coverage-mask builder
     ├── sepp.py                         # SourceExtractor++ config, command, post-process
     ├── calibration.py                  # Gaia XP loader, NN matching, spatial ZP
     ├── depth.py                        # 5-sigma depth (curve fit / empty-aper) + ZP header keys
@@ -281,6 +289,88 @@ result = run_photometry(
 You can also call `phot7ds.standardize_catalog()` on an existing catalog
 outside the pipeline.
 
+The schema covers `bands`, which defaults to **every registry filter** (42).
+With the default apertures and per-band masks that is `31 + 25 × 42 = 1081`
+columns, above the FITS limit, so `output_format="auto"` writes Parquet. A
+FITS table fits up to 38 bands with the defaults (42 without per-band masks);
+pass `bands=` to restrict the schema if you need FITS.
+
+### Filter registry
+
+`phot7ds/data/filters_7ds.ecsv` is the single list of filters phot7ds
+knows, one row per filter in catalog band order:
+
+| Column            | Meaning                                                   |
+| ----------------- | --------------------------------------------------------- |
+| `name`            | `FILTER` header value (`g`, `m425`, `m425w`)              |
+| `kind`            | `broad`, `medium` or `wide`                               |
+| `lambda_pivot_nm` | Pivot wavelength of the transmission curve [nm]          |
+| `fwhm_nm`         | FWHM of the transmission curve [nm]                       |
+| `key`             | Header-keyword token (1-3 of `A-Z0-9`, unique)            |
+
+`key` is what goes into `ZP05M<key>`, `UL5EM<key>`, `BRMSM<key>`: broad
+bands use the upper-case letter (`G`), medium bands the 3 digits (`425`),
+wide bands the first two digits plus `W` (`m425w` -> `42W`), so `m425` and
+`m425w` no longer share a keyword. The 23 original bands keep their v0.8
+keys.
+
+When the filter set changes, edit that file or regenerate it from the
+transmission curves (`<name>.csv` with `lam` [nm] and `trans`); new rows
+get the default key and kind, and the loader rejects duplicate names or
+keys:
+
+```bash
+python -m phot7ds.filters /lyman/data1/7DS/RIS/config/Filter_transmission phot7ds/data/filters_7ds.ecsv
+```
+
+To use another registry without editing the package, set
+`PhotometryConfig.filter_registry` / `run_photometry(filter_registry=...)`
+or `$PHOT7DS_FILTER_REGISTRY` (the latter also sets `DEFAULT_BANDS`).
+
+### Which images are measured
+
+Each science image's filter comes from its `FILTER` header card (from the
+`_<filter>_` token of the file name when the card is missing). An image is
+**dropped**, with a WARNING and an entry in the manifest's
+`dropped_images` (`image`, `filter`, `reason`), when
+
+- no filter can be found (`unknown_filter`),
+- its filter is not in the registry (`not_in_registry`), or
+- `deduplicate_by_filter=True` (default) and another image of the same
+  filter sorts first by basename (`duplicate`).
+
+The run stops with `ValueError` only if no image is left. Bands that get no
+zero-point for some aperture (e.g. the reference catalog lacks
+`mag_<band>`) are measured but uncalibrated; they are listed in the
+`UNCALBND` header card, the manifest's `uncalibrated_bands` and an
+end-of-run WARNING.
+
+### Output format: FITS or Parquet
+
+`output_format` (`PhotometryConfig` field or `run_photometry` kwarg):
+
+- `"auto"` (default): FITS when the table has <= 999 columns, otherwise
+  Parquet, with a WARNING;
+- `"fits"`: always FITS, `ValueError` above 999 columns;
+- `"parquet"`: always Parquet.
+
+It applies to the raw split catalog and the final one, and the suffix
+follows (`T01234_7DS_phot.fits` -> `T01234_7DS_phot.parquet`; an older file
+of the other format with the same stem is removed). The manifest records
+`catalog_path`, `catalog_format` and `catalog_columns`. A Parquet file keeps
+everything the FITS table carries (units, descriptions, masks, and every
+header card with its comment in the table `meta`). Read either with:
+
+```python
+from phot7ds import read_catalog
+cat = read_catalog("/data/.../T01234_7DS_phot.parquet")   # or .fits
+cat.meta["ZP05MG"]   # plain value, as from a FITS header
+```
+
+`load_unified_catalog` and the VAC pipeline accept both formats; for
+plain astropy use `Table.read(path, format="parquet")` (meta values are
+then `(value, comment)` tuples).
+
 ### Tile-polygon trim of the reference catalog
 
 If your tile geometry is known, pass a single-row table with
@@ -462,8 +552,10 @@ Set `save_residual_plots=True` to drop residual maps into
 After calibration, the constant ZP and its sigma-clipped scatter are
 written to the output FITS header as `ZP<APER>M<BAND>` and
 `ZE<APER>M<BAND>` (e.g. `ZP05MG`, `ZE05M575`). Aperture tokens are `05`
-(5″), `10` (10″), `AU` (`auto`); band tokens are `G`/`R`/`I`/`Z` for
-broadband and the 3-digit central wavelength for medium bands.
+(5″), `10` (10″), `AU` (`auto`); band tokens are the registry `key`
+(`G`, `425`, `42W`; see [Filter registry](#filter-registry)). Two bands
+of one run producing the same keyword stop the run instead of silently
+overwriting each other.
 
 ## 5-sigma depth
 
@@ -540,7 +632,8 @@ Add a new preset by extending `phot7ds.presets.DETECTION_PRESETS`.
 ## FITS catalog header
 
 The final calibrated catalog carries provenance / coverage metadata in
-its primary header. Selected keys (all 8-char, no `HIERARCH`):
+its primary header (in the table `meta` of a Parquet catalog). Selected
+keys (all 8-char, no `HIERARCH`):
 
 | Key        | Meaning                                          |
 | ---------- | ------------------------------------------------ |
@@ -555,6 +648,9 @@ its primary header. Selected keys (all 8-char, no `HIERARCH`):
 | `BADPMASK` | Bad-pixel mask basename (if any)                 |
 | `REFCAT`   | Reference catalog basename                       |
 | `NSCIIMG`  | Number of measurement (science) images           |
+| `FILTREG`  | Filter registry file; `NFILTREG` its filter count |
+| `NDROPIMG` | Input images not measured (listed in the manifest) |
+| `UNCALBND` | Bands lacking a zero-point (comma list, if any)  |
 | `SCIMGNNN` | Per-image basename (`NNN` = zero-padded index)   |
 | `EGAINNNN` | Gain SE++ used for image `NNN` [e-/ADU] (its `EGAIN`, else `GAIN`) |
 | `SATURNNN` | Saturation SE++ used for image `NNN` (its `SATURATE`, else `SATLV`) |
