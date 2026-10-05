@@ -229,6 +229,33 @@ def extract_gain_values(
     return gains
 
 
+def read_detection_gain(
+    detection_image: str,
+    default_gain: float = 0.0,
+    gain_keywords: Sequence[str] = GAIN_KEYWORDS,
+) -> tuple[float, str | None]:
+    """Gain [e-/ADU] SE++ should use for the detection image.
+
+    Same keyword order as the measurement images: a 7DS white stack carries
+    the effective gain in ``EGAIN``; a DELVE mosaic carries only SWarp's
+    ``GAIN`` and falls through to it. A missing value falls back to
+    ``default_gain`` (``0`` = SE++'s "no Poisson term") with a warning.
+
+    Returns ``(gain, keyword)``; ``keyword`` is ``None`` for the fallback.
+    """
+    try:
+        gain, key = _first_header_value(fits.getheader(detection_image), gain_keywords)
+    except Exception:
+        gain, key = None, None
+    if gain is None:
+        log.warning(
+            "No gain keyword (%s) in detection image %s; using %g",
+            "/".join(gain_keywords), os.path.basename(detection_image), default_gain,
+        )
+        return float(default_gain), None
+    return gain, key
+
+
 def _primary_data_shape(image_path: str) -> tuple[int, ...]:
     """Return the primary-HDU pixel shape ``(ny, nx)`` without loading data."""
     with fits.open(image_path, memmap=True) as hdul:
@@ -355,6 +382,7 @@ __all__ = [
     "organize_images_by_filter",
     "extract_band_names_and_saturation",
     "extract_gain_values",
+    "read_detection_gain",
     "GAIN_KEYWORDS",
     "SATURATION_KEYWORDS",
     "build_coverage_mask",

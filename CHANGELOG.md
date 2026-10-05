@@ -4,6 +4,40 @@ All notable changes to `phot7ds`. Versions follow
 [semantic versioning](https://semver.org/) loosely: the minor number moves on
 new features or behaviour changes, the patch number on fixes.
 
+## v0.8.2 — 2026-10-05
+
+Detection-image gain from `EGAIN`, and tile-polygon geometry that works
+across RA = 0/360 and at the poles. Ordinary tiles' catalogs change only
+through the detection gain (`snrratio` etc.) and a handful of edge stars in
+the ZP reference.
+
+### Changed — behaviour worth knowing about before you re-run
+
+- **Detection-image gain follows the measurement images:** `EGAIN`, else
+  `GAIN`, else `0` with a warning (`images.read_detection_gain`). It used to
+  be `GAIN` with a default of `1.0`, a DELVE leftover: a 7DS white stack
+  carrying only `EGAIN` ran at gain 1, and one built by phot7ds's SWarp
+  builder used SWarp's "maximum equivalent" `GAIN` (~4e4, i.e. no Poisson
+  term) instead of its `EGAIN` (~3.4). DELVE mosaics carry only `GAIN` and
+  are unaffected. Changes `snrratio` and anything else SE++ derives from
+  detection-image noise. Recorded as `DETGAIN` in the catalog header and
+  `detection_gain` / `detection_gain_keyword` in the manifest.
+
+### Fixed
+
+- **Tiles straddling RA = 0/360 lost their whole reference catalog.** The
+  polygon trim averaged raw corner RAs (359.3 and 0.7 -> 180), so the 145
+  such tiles in the 7DT tile table kept no Gaia XP stars (no ZP) and no
+  REGALADE/VHS/GALEX sources, and their VizieR box was centred at RA 180.
+  `trim_to_tile_polygon` and `vac.vizier.tile_query_box` now work on the
+  tangent plane about the tile centre, which also fixes the near-pole tiles
+  (the polar cap `T00000` used to keep nothing, and some neighbours kept
+  stars from the wrong side of the pole). Ordinary tiles change only at the
+  edges (well under 1 % of reference stars).
+- The 7DS white-stack builder reads the pixel scale from the full WCS
+  (`proj_plane_pixel_scales`) instead of `CD1_1` / `CDELT1`, which gave
+  3600″/pix on PC-matrix headers with `CDELT1 = 1`.
+
 ## v0.8.1 — 2026-10-02
 
 Provenance and zero-point solutions in the run log and manifest. Catalog

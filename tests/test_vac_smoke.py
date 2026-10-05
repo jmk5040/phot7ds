@@ -448,15 +448,29 @@ def test_tile_query_box_deprojects_ra_span() -> None:
     })
     ra_c, dec_c, width, height = tile_query_box(tile)
     assert ra_c == pytest.approx(180.0)
-    assert dec_c == pytest.approx(dec)
-    assert width == pytest.approx(1.4, abs=1e-6)
-    assert height == pytest.approx(1.0, abs=1e-6)
+    assert dec_c == pytest.approx(dec, abs=0.05)
+    # Angular width of the wider (equatorward) edge: 1.4 * cos(82.5)/cos(83).
+    assert width == pytest.approx(1.5, abs=0.01)
+    assert height == pytest.approx(1.0, abs=0.01)
     # The raw span is many times the angular width at this declination.
     assert 2 * half_width > 5 * width
 
     _, _, padded_w, padded_h = tile_query_box(tile, margin_deg=0.05)
     assert padded_w == pytest.approx(width + 0.05)
     assert padded_h == pytest.approx(height + 0.05)
+
+
+def test_tile_query_box_across_ra_zero() -> None:
+    """A tile straddling RA 0 is queried at RA ~0 with its true width, not at RA 180."""
+    from phot7ds.vac.vizier import tile_query_box
+
+    tile = {"ra1": 359.3, "ra2": 0.7, "ra3": 0.7, "ra4": 359.3,
+            "dec1": -0.5, "dec2": -0.5, "dec3": 0.5, "dec4": 0.5}
+    ra_c, dec_c, width, height = tile_query_box(tile)
+    assert min(ra_c, 360.0 - ra_c) == pytest.approx(0.0, abs=1e-9)
+    assert dec_c == pytest.approx(0.0, abs=1e-9)
+    assert width == pytest.approx(1.4, abs=1e-3)
+    assert height == pytest.approx(1.0, abs=1e-3)
 
 
 def test_time_limit_raises_and_restores_handler() -> None:

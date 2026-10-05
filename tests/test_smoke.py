@@ -410,6 +410,19 @@ def test_annotate_catalog_meta_records_measurement_gain() -> None:
     assert meta["EGAIN000"][0] == 44.8
     assert meta["EGAIN001"][0] == 7.6
     assert meta["SATUR001"][0] == 4612.0
+    assert "DETGAIN" not in meta
+
+
+def test_detection_gain_prefers_egain(tmp_path) -> None:
+    """7DS white stacks use EGAIN (not SWarp's GAIN); DELVE mosaics fall back to GAIN."""
+    from phot7ds.images import read_detection_gain
+
+    white = _write_header_only(tmp_path / "white.fits", GAIN=38742.7, EGAIN=3.416)
+    delve = _write_header_only(tmp_path / "delve.fits", GAIN=131.6)
+    bare = _write_header_only(tmp_path / "bare.fits")
+    assert read_detection_gain(white) == (3.416, "EGAIN")
+    assert read_detection_gain(delve) == (131.6, "GAIN")
+    assert read_detection_gain(bare) == (0.0, None)
 
 
 def test_zp_solution_is_recorded_and_reproducible(caplog) -> None:
@@ -580,6 +593,61 @@ def test_trim_to_tile_polygon() -> None:
     )
     trimmed = trim_to_tile_polygon(tile_info, cat, margin=0.0)
     assert set(np.asarray(trimmed["ra"]).tolist()) == {10.5, 10.4}
+
+
+@pytest.mark.parametrize("margin", [0.0, 0.06])
+def test_trim_to_tile_polygon_across_ra_zero(margin) -> None:
+    from phot7ds.tile_geometry import trim_to_tile_polygon
+
+    tile_info = {
+        "ra1": 359.3, "dec1": -0.5, "ra2": 0.7, "dec2": -0.5,
+        "ra3": 0.7, "dec3": 0.5, "ra4": 359.3, "dec4": 0.5,
+    }
+    cat = Table({
+        "ra": [359.9, 0.2, 359.5, 0.5, 180.0, 358.0, 2.0],
+        "dec": [0.0, 0.1, -0.2, 0.3, 0.0, 0.0, 0.0],
+    })
+    trimmed = trim_to_tile_polygon(tile_info, cat, margin=margin)
+    # RA values are returned as stored, not unwrapped.
+    assert sorted(np.asarray(trimmed["ra"]).tolist()) == [0.2, 0.5, 359.5, 359.9]
+
+
+def test_trim_to_tile_polygon_polar_cap() -> None:
+    """The polar-cap tile (corners circling the pole) keeps the pole region."""
+    from phot7ds.tile_geometry import trim_to_tile_polygon
+
+    tile_info = {
+        "ra1": 56.36, "ra2": 123.64, "ra3": 236.36, "ra4": 303.64,
+        "dec1": -89.17, "dec2": -89.17, "dec3": -89.17, "dec4": -89.17,
+    }
+    cat = Table({
+        "ra": [0.0, 90.0, 200.0, 315.0, 0.0, 180.0],
+        "dec": [-89.99, -89.7, -89.6, -89.4, -88.5, 89.9],
+    })
+    trimmed = trim_to_tile_polygon(tile_info, cat, margin=0.0)
+    assert sorted(np.asarray(trimmed["dec"]).tolist()) == [-89.99, -89.7, -89.6, -89.4]
+
+
+def test_white_stack_pixel_scale_from_pc_matrix(tmp_path) -> None:
+    """A PC-matrix header with CDELT1 = 1 must not read as 3600 arcsec/pix."""
+    from phot7ds.detection.sevends import _reference_frame
+
+    scale = 0.505 / 3600.0
+    cards = dict(
+        CTYPE1="RA---TAN", CTYPE2="DEC--TAN", CRVAL1=150.0, CRVAL2=2.0,
+        CRPIX1=2.0, CRPIX2=2.0, CUNIT1="deg", CUNIT2="deg",
+    )
+    pc = _write_header_only(
+        tmp_path / "pc.fits", **cards, CDELT1=1.0, CDELT2=1.0,
+        PC1_1=-scale, PC1_2=0.0, PC2_1=0.0, PC2_2=scale,
+    )
+    cd = _write_header_only(
+        tmp_path / "cd.fits", **cards, CD1_1=-scale, CD1_2=0.0, CD2_1=0.0, CD2_2=scale,
+    )
+    for path in (pc, cd):
+        ra, dec, pix, nx, ny = _reference_frame(path)
+        assert (ra, dec, nx, ny) == (150.0, 2.0, 4, 4)
+        assert pix == pytest.approx(0.505)
 
 
 def test_organize_images_by_filter_dict() -> None:

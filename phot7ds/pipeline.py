@@ -41,6 +41,7 @@ from .images import (
     extract_band_names_and_saturation,
     extract_gain_values,
     organize_images_by_filter,
+    read_detection_gain,
 )
 from .masks import (
     MASKBIT,
@@ -272,6 +273,7 @@ def _annotate_catalog_meta(
     mask_staging: str | None = None,
     gain_values: Sequence[float] | None = None,
     saturation_values: Sequence[float] | None = None,
+    detection_gain: float | None = None,
 ) -> None:
     """Inject high-value run-time metadata into ``meta`` (in place).
 
@@ -282,7 +284,7 @@ def _annotate_catalog_meta(
 
     ``gain_values`` / ``saturation_values`` (1:1 with ``science_images``)
     add ``EGAINnnn`` / ``SATURnnn``: the gain and saturation SE++ used for
-    measurement image ``SCIMGnnn``.
+    measurement image ``SCIMGnnn``; ``detection_gain`` adds ``DETGAIN``.
 
     ``band_masks`` (per-band bitmask provenance, see :mod:`phot7ds.masks`)
     adds ``MB<name>`` bit definitions, ``NBANDMSK``/``NCNTMSK`` counts and one
@@ -312,6 +314,10 @@ def _annotate_catalog_meta(
     meta["DETIMG"] = (
         str(Path(detection_image).name), "Detection image basename"
     )
+    if detection_gain is not None:
+        meta["DETGAIN"] = (
+            float(detection_gain), "SE++ gain of the detection image [e-/ADU]"
+        )
     if coverage_mask:
         meta["COVMASK"] = (
             str(Path(coverage_mask).name), "Coverage mask basename"
@@ -516,8 +522,9 @@ def run_photometry(
         irrelevant; images are reorganised internally by filter.
     detection_image
         Detection FITS image (built externally; see
-        :mod:`phot7ds.detection`). Must have ``GAIN`` and ``SATURATE`` header
-        keywords.
+        :mod:`phot7ds.detection`). The gain is read from ``EGAIN`` (7DS
+        white stacks), else ``GAIN`` (DELVE mosaics), else ``0`` with a
+        warning; the saturation from ``SATURATE``.
     reference_catalog
         Path to a Gaia XP synphot CSV with at least ``ra``, ``dec`` and
         ``mag_<band>`` columns for the bands present in ``science_images``.
@@ -711,8 +718,12 @@ def run_photometry(
         )
 
         det_hdr = fits.getheader(detection_image)
-        det_gain = float(det_hdr.get("GAIN", 1.0))
+        det_gain, det_gain_key = read_detection_gain(detection_image)
         det_saturate = float(det_hdr.get("SATURATE", 60000.0))
+        log.info(
+            "Detection image gain [e-/ADU]: %.4f (%s)",
+            det_gain, det_gain_key or "fallback",
+        )
 
         aper_radius_pix = [
             round(aper / cfg.pixscale_arcsec, 3)
@@ -885,6 +896,7 @@ def run_photometry(
             mask_staging=staging.location,
             gain_values=gain_values,
             saturation_values=saturation_values,
+            detection_gain=det_gain,
         )
         if standardize_catalog:
             schema = build_canonical_schema(
@@ -922,6 +934,7 @@ def run_photometry(
                 )
             ],
             "detection_gain": det_gain,
+            "detection_gain_keyword": det_gain_key,
             "detection_saturation": det_saturate,
             "config": cfg.to_dict(),
         }

@@ -2,7 +2,7 @@
 
 Working memory for the `phot7ds` package and the 7DS/RIS scripts around it.
 Read this first when starting a new session. Version at time of writing:
-**phot7ds 0.8.1** (`phot7ds/__init__.py`, `pyproject.toml`).
+**phot7ds 0.8.2** (`phot7ds/__init__.py`, `pyproject.toml`).
 
 ---
 
@@ -420,6 +420,26 @@ bitmask internally). Details in §5 and README "Per-band mask flags".
 - Open (user to decide): the full-catalog constant-ZP column
   `{aper}_mag_err_*` adds `zp_rmse` (spatial RMSE), not `zperr` (constant
   scatter), unlike the calibration subset and the docstring.
+
+## 9g. Recent changes (2026-10-05, v0.8.2) — user report fixes
+
+From a user report (`RIS/bin/phot7ds_claim*.png`, items 2 and 6):
+
+- Detection gain = `EGAIN` → `GAIN` → 0 (`images.read_detection_gain`),
+  same order as the measurement images; was `GAIN` → 1.0 (DELVE leftover).
+  No branching on `detection_label`: DELVE mosaics have only `GAIN`
+  (SWarp max-equivalent, e.g. 131.6) and fall through; phot7ds SWarp white
+  stacks have both (`GAIN` ≈ 3.9e4, `EGAIN` ≈ 3.4) and now use `EGAIN`.
+  `DETGAIN` header card, manifest `detection_gain_keyword`.
+- `tile_geometry`: polygon trim on the gnomonic plane about the spherical
+  mean of the corners (`tile_center`, `gnomonic`, `tile_plane`). Fixes the
+  145 tiles straddling RA 0 (kept 0 reference stars) and polar tiles
+  (`T00000` kept 0; `T00001` kept the wrong side of the pole).
+  `vac.vizier.tile_query_box` uses the same tangent-plane extent. Ordinary
+  tiles: <1 % edge differences.
+- `detection.sevends._reference_frame`: pixel scale from
+  `proj_plane_pixel_scales` (PC + `CDELT1 = 1` headers read 3600″/pix).
+- Report items 1 (new 41-filter set), 3–5 deferred; item 1 targeted at v0.9.
 
 ## 10. Open / possible next steps
 

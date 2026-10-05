@@ -24,7 +24,7 @@ import numpy as np
 from astropy.io import fits
 from astropy.table import Table
 
-from ..tile_geometry import trim_to_tile_polygon
+from ..tile_geometry import tile_plane, trim_to_tile_polygon
 from .config import VACConfig
 
 log = logging.getLogger(__name__)
@@ -142,36 +142,23 @@ def _sanitize_table_for_fits(tab: Table) -> Table:
     return clean
 
 
-def _tile_corners(tile_info: Any) -> tuple[np.ndarray, np.ndarray]:
-    """Return ``(ra_corners, dec_corners)`` from a tile row's ra1..ra4/dec1..dec4."""
-    def _get(key: str) -> float:
-        if isinstance(tile_info, Table):
-            val = tile_info[key]
-            return float(val[0] if hasattr(val, "__len__") and len(val) else val)
-        return float(tile_info[key])
-
-    ra = np.array([_get(f"ra{i}") for i in (1, 2, 3, 4)], dtype=float)
-    dec = np.array([_get(f"dec{i}") for i in (1, 2, 3, 4)], dtype=float)
-    return ra, dec
-
-
 def tile_query_box(
     tile_info: Any, *, margin_deg: float = 0.0
 ) -> tuple[float, float, float, float]:
     """Return ``(ra_center, dec_center, width, height)`` in degrees.
 
-    ``width`` is the tile's *angular* extent, i.e. the RA span deprojected by
-    ``cos(dec)``. This matters near the poles: a 1.4°-wide tile at dec = -83°
-    spans ~12° in raw RA, and querying VizieR with that raw span pulls in
-    roughly an order of magnitude too much sky — enough to stall a dense
-    catalog like VHS DR5. ``margin_deg`` pads the box; the polygon trim that
-    follows removes the excess.
+    ``width`` / ``height`` are the tile's *angular* extent on the tangent
+    plane about its centre, not the raw RA span. This matters near the
+    poles: a 1.4°-wide tile at dec = -83° spans ~12° in raw RA, and querying
+    VizieR with that raw span pulls in roughly an order of magnitude too
+    much sky — enough to stall a dense catalog like VHS DR5. It also keeps
+    tiles straddling RA = 0/360 centred on the wrap (not at RA 180) and gives
+    the polar-cap tile a real box. ``margin_deg`` pads the box; the polygon
+    trim that follows removes the excess.
     """
-    ra_corners, dec_corners = _tile_corners(tile_info)
-    dec_c = float(np.mean(dec_corners))
-    ra_c = float(np.mean(ra_corners))
-    width = float(np.max(ra_corners) - np.min(ra_corners)) * np.cos(np.radians(dec_c))
-    height = float(np.max(dec_corners) - np.min(dec_corners))
+    ra_c, dec_c, xi, eta = tile_plane(tile_info)
+    width = float(np.max(xi) - np.min(xi))
+    height = float(np.max(eta) - np.min(eta))
     return ra_c, dec_c, width + margin_deg, height + margin_deg
 
 

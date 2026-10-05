@@ -28,7 +28,10 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from glob import glob
 
+import numpy as np
 from astropy.io import fits
+from astropy.wcs import WCS
+from astropy.wcs.utils import proj_plane_pixel_scales
 
 log = logging.getLogger(__name__)
 
@@ -179,16 +182,19 @@ def collect_band_inputs(
 
 
 def _reference_frame(image_path: str) -> tuple[float, float, float, int, int]:
-    """Read ``(ra, dec, pixscale_arcsec, nx, ny)`` from a reference header."""
+    """Read ``(ra, dec, pixscale_arcsec, nx, ny)`` from a reference header.
+
+    The pixel scale comes from the full linear transform, so CD-matrix,
+    PC + CDELT (where ``CDELT1`` may be a bare 1.0) and rotated frames all
+    give the true scale.
+    """
     h = fits.getheader(image_path)
     ra = float(h["CRVAL1"])
     dec = float(h["CRVAL2"])
-    if "CD1_1" in h:
-        pixscale = abs(float(h["CD1_1"])) * 3600.0
-    elif "CDELT1" in h:
-        pixscale = abs(float(h["CDELT1"])) * 3600.0
-    else:
-        raise KeyError(f"No CD1_1 / CDELT1 in {os.path.basename(image_path)}")
+    wcs = WCS(h).celestial
+    if not wcs.has_celestial:
+        raise KeyError(f"No celestial WCS in {os.path.basename(image_path)}")
+    pixscale = float(np.mean(proj_plane_pixel_scales(wcs))) * 3600.0
     return ra, dec, pixscale, int(h["NAXIS1"]), int(h["NAXIS2"])
 
 #%%
