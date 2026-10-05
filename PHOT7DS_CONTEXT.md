@@ -2,7 +2,7 @@
 
 Working memory for the `phot7ds` package and the 7DS/RIS scripts around it.
 Read this first when starting a new session. Version at time of writing:
-**phot7ds 0.9.0** (`phot7ds/__init__.py`, `pyproject.toml`).
+**phot7ds 0.9.1** (`phot7ds/__init__.py`, `pyproject.toml`).
 
 ---
 
@@ -466,6 +466,24 @@ From a user report (`RIS/bin/phot7ds_claim*.png`, items 2 and 6):
   m483 m534 m561 m586 m615 m640 m661 m692w m710w m769w m832w). The
   reference-catalog location for the new filters is still to be updated by
   the user.
+
+## 9i. Recent changes (2026-10-05, v0.9.1) — empty-aperture depth fix
+
+- Bug: `empty_aperture_sky_sigma` summed raw pixels without subtracting a
+  background, so large-scale sky structure (strongest in red bands)
+  inflated σ_aper. UL5RM ran up to 0.5 mag too shallow (m850 old 16.34 vs
+  header 16.85).
+- Fix: `depth.mesh_background` (SExtractor mode estimator per cell, median
+  filter, bicubic spline) uses the run's `background_cell_size` /
+  `smoothing_box_size`, as SE++ does. Apertures that touch no-data pixels
+  are rejected. `background_cell_size=None` gives the old behaviour.
+- The remaining offset (T00236 median UL5RM − header = −0.15) is
+  correlated noise: the aperture/pixel σ ratio is 1.0 at r=1 px and ~1.2
+  at r=5″ apertures. It is real. The coadd `UL5_*` and the error curve
+  both assume white noise. New `UL{N}WM{key}` (white-noise depth) agrees
+  with the header within +0.05 mag. Manifest depth entries gain
+  `depth_white`, `white_sigma`, `pixel_sigma`, `correlation_ratio`,
+  `background`.
 
 ## 10. Open / possible next steps
 

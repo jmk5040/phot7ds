@@ -4,6 +4,44 @@ All notable changes to `phot7ds`. Versions follow
 [semantic versioning](https://semver.org/) loosely: the minor number moves on
 new features or behaviour changes, the patch number on fixes.
 
+## v0.9.1 — 2026-10-05
+
+Fixes the empty-aperture 5σ depth (`UL{N}RM*`), which came out too shallow,
+by up to 0.5 mag in the red medium bands.
+
+### Fixed
+
+- `empty_aperture_sky_sigma` summed raw pixels without subtracting a
+  background. Sky structure on scales larger than an aperture (gradients,
+  scattered light, fringing) inflated the scatter of the sums, although
+  SE++ fluxes never see it because SE++ subtracts its own mesh background.
+  The pixel sums now have an SE++-like mesh background removed
+  (`depth.mesh_background`: per-cell clipped mode, median filter, bicubic
+  spline). It uses the run's `background_cell_size` / `smoothing_box_size`.
+  Apertures that touch no-data (0 / NaN) pixels are also rejected. On
+  T00236 (23 bands), the median UL5RM − header offset goes from −0.22 to
+  −0.15 mag. m850 rises 16.34 → 16.69 and m875 rises 16.42 → 16.76. g, r
+  and i are unchanged. Pass `background_cell_size=None` for the old
+  behaviour.
+
+### Added
+
+- `UL{N}WM{BAND}` header card: white-noise depth from the
+  background-subtracted pixel RMS × √n_pix. It uses the same convention
+  as the coadd `UL5_*` cards and agrees with them within ~0.05 mag.
+- Manifest depth entries gain `depth_white`, `white_sigma`, `pixel_sigma`,
+  `correlation_ratio` (σ_aper / white σ) and `background`. The log table
+  gains `white` / `corr` columns.
+
+### Notes
+
+- UL5RM is still ~0.15 mag shallower than the header. That gap is
+  pixel-to-pixel correlated noise from resampling and coadding
+  (`correlation_ratio` ≈ 1.2: 1.0 at a 1-pixel aperture, growing with
+  radius). It is real noise. The coadd header and the error-curve depth
+  both assume white noise, so UL5RM is the more honest depth, and UL5WM is
+  the number to compare with the header.
+
 ## v0.9.0 — 2026-10-05
 
 The 7DS filter set grows from 23 to 42 (adds `u`, `z`, 10 new medium bands

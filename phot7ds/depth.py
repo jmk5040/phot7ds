@@ -266,6 +266,73 @@ def _circular_footprint(radius_pix: float) -> tuple[np.ndarray, int]:
     return mask, rr
 
 
+def mesh_background(
+    data: np.ndarray,
+    valid: np.ndarray,
+    cell_size: int = 256,
+    smoothing_box_size: int = 3,
+    *,
+    subsample: int = 2,
+):
+    """SExtractor-style background model, as SE++ subtracts before measuring.
+
+    Per ``cell_size`` mesh cell: 3-sigma clipped mode (``2.5 median - 1.5
+    mean``; the median when the clipped distribution is too skewed), a
+    ``smoothing_box_size`` median filter over the cell grid, then a bicubic
+    spline through the cell centres. Returns a callable ``bkg(x, y)``
+    (0-based pixel coordinates, any shape).
+    """
+    from scipy.interpolate import RectBivariateSpline
+
+    ny, nx = data.shape
+    cell = int(max(8, min(cell_size, ny, nx)))
+    gy, gx = max(ny // cell, 1), max(nx // cell, 1)
+    step = max(int(subsample), 1)
+    blocks = data[: gy * cell, : gx * cell].reshape(gy, cell, gx, cell)[:, ::step, :, ::step]
+    good = valid[: gy * cell, : gx * cell].reshape(gy, cell, gx, cell)[:, ::step, :, ::step]
+    blocks = blocks.transpose(0, 2, 1, 3).reshape(gy, gx, -1)
+    good = good.transpose(0, 2, 1, 3).reshape(gy, gx, -1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        mean, median, std = sigma_clipped_stats(
+            blocks, mask=~good, sigma=3.0, maxiters=5, axis=2,
+        )
+    mean, median, std = (np.ma.filled(np.ma.asarray(a, dtype=float), np.nan)
+                         for a in (mean, median, std))
+    mode = 2.5 * median - 1.5 * mean
+    skewed = np.abs(mean - median) > 0.3 * std
+    grid = np.where(skewed, median, mode)
+    grid[good.sum(axis=2) < 0.1 * good.shape[2]] = np.nan
+    if np.isfinite(grid).any():
+        grid = np.where(np.isfinite(grid), grid, np.nanmedian(grid))
+    else:
+        grid = np.zeros_like(grid)
+    if smoothing_box_size and smoothing_box_size > 1:
+        from scipy.ndimage import median_filter
+
+        grid = median_filter(grid, size=int(smoothing_box_size), mode="nearest")
+    yc = (np.arange(gy) + 0.5) * cell - 0.5
+    xc = (np.arange(gx) + 0.5) * cell - 0.5
+    # A single cell along an axis: constant along it (the spline needs 2 knots).
+    if gy == 1:
+        grid, yc = np.vstack([grid, grid]), np.array([0.0, ny - 1.0])
+    if gx == 1:
+        grid, xc = np.hstack([grid, grid]), np.array([0.0, nx - 1.0])
+    # The domain spans the whole image so the half cell beyond the outer
+    # cell centres is extrapolated rather than held flat.
+    spline = RectBivariateSpline(
+        yc, xc, grid, kx=min(3, len(yc) - 1), ky=min(3, len(xc) - 1),
+        bbox=[min(-0.5, yc[0]), max(ny - 0.5, yc[-1]), min(-0.5, xc[0]), max(nx - 0.5, xc[-1])],
+    )
+
+    def bkg(x, y):
+        x = np.clip(np.asarray(x, float), -0.5, nx - 0.5)
+        y = np.clip(np.asarray(y, float), -0.5, ny - 0.5)
+        return spline.ev(y, x)
+
+    return bkg
+
+
 def empty_aperture_sky_sigma(
     image_path: str,
     aperture_radius_pix: float,
@@ -280,13 +347,23 @@ def empty_aperture_sky_sigma(
     seed: int = 42,
     sigma_clip: float = 3.0,
     max_attempts: int = 20,
+    background_cell_size: int | None = 256,
+    smoothing_box_size: int = 3,
 ) -> dict[str, float | int]:
     """Estimate the sky sigma in a circular aperture from empty regions.
 
     Many circular apertures are placed at random positions on the image,
     avoiding both catalog sources (via a KDTree) and any pixels flagged in
-    the coverage mask. The sigma-clipped standard deviation of the summed
-    aperture fluxes is the per-aperture sky noise.
+    the coverage mask. The background SE++ subtracts before measuring
+    (:func:`mesh_background` with ``background_cell_size`` /
+    ``smoothing_box_size``, the SE++ run's settings) is subtracted from each
+    aperture sum, so large-scale sky structure that never reaches the SE++
+    fluxes does not inflate the noise. The sigma-clipped standard deviation
+    of the sums is the per-aperture sky noise; it still includes the
+    pixel-to-pixel correlated noise of a resampled coadd, which
+    ``white_sigma`` (pixel sigma x sqrt(aperture pixels), the header
+    ``SKYSIG`` convention) leaves out. ``background_cell_size=None`` sums
+    the raw image (pre-0.9.1 behaviour).
 
     Parameters
     ----------
@@ -324,13 +401,20 @@ def empty_aperture_sky_sigma(
         for the final summary statistic.
     max_attempts
         Maximum number of candidate-generation rounds before giving up.
+    background_cell_size, smoothing_box_size
+        Mesh size and grid median filter of the subtracted background
+        (match the SE++ run); ``background_cell_size=None`` disables it.
+
+    Apertures touching a zero / NaN (no-data) pixel are rejected.
 
     Returns
     -------
     dict
-        ``{sky_sigma, n_apertures, n_attempts, mean, median, status}``.
-        ``status`` is ``'ok'`` if at least ``n_apertures // 4`` apertures
-        were accepted, otherwise ``'insufficient'``.
+        ``{sky_sigma, pixel_sigma, white_sigma, correlation_ratio,
+        background, n_apertures, n_attempts, mean, median, status}``.
+        ``correlation_ratio = sky_sigma / white_sigma``. ``status`` is
+        ``'ok'`` if at least ``n_apertures // 4`` apertures were accepted,
+        otherwise ``'insufficient'``.
     """
     if not os.path.exists(image_path):
         log.warning("Image not found for empty-aperture depth: %s", image_path)
@@ -387,9 +471,19 @@ def empty_aperture_sky_sigma(
 
     aper_mask, rr = _circular_footprint(aperture_radius_pix)
     margin = rr + 1
+    npix_aper = int(aper_mask.sum())
+
+    valid = np.isfinite(data) & (data != 0)
+    if covmask is not None:
+        valid &= ~covmask
+    bkg = (
+        mesh_background(data, valid, background_cell_size, smoothing_box_size)
+        if background_cell_size else None
+    )
 
     rng = np.random.default_rng(seed)
     accepted_sums: list[float] = []
+    accepted_xy: list[tuple[int, int]] = []
     n_attempts = 0
     candidate_batch = max(n_apertures * 5, 5000)
 
@@ -417,7 +511,10 @@ def empty_aperture_sky_sigma(
             stamp = data[y0 - rr:y0 + rr + 1, x0 - rr:x0 + rr + 1]
             if stamp.shape != aper_mask.shape:
                 continue
+            if not valid[y0 - rr:y0 + rr + 1, x0 - rr:x0 + rr + 1][aper_mask].all():
+                continue
             accepted_sums.append(float(stamp[aper_mask].sum()))
+            accepted_xy.append((int(x0), int(y0)))
 
     if len(accepted_sums) < max(n_apertures // 4, 50):
         log.warning(
@@ -435,9 +532,31 @@ def empty_aperture_sky_sigma(
         }
 
     sums = np.asarray(accepted_sums, dtype=np.float64)
+    xy = np.asarray(accepted_xy, dtype=float)
+    if bkg is not None:
+        sums = sums - npix_aper * bkg(xy[:, 0], xy[:, 1])
     mean, median, sigma = sigma_clipped_stats(sums, sigma=sigma_clip, maxiters=5)
+
+    # Per-pixel sigma at random valid pixels, for the white-noise comparison.
+    py = rng.integers(0, ny, size=200_000)
+    px = rng.integers(0, nx, size=200_000)
+    keep = valid[py, px]
+    if tree is not None and keep.any():
+        keep[keep] = tree.query(np.column_stack([px[keep], py[keep]]), k=1)[0] > exclusion_radius_pix
+    pix = data[py[keep], px[keep]].astype(np.float64)
+    if bkg is not None and pix.size:
+        pix = pix - bkg(px[keep], py[keep])
+    pix_sigma = (
+        float(sigma_clipped_stats(pix, sigma=sigma_clip, maxiters=10)[2])
+        if pix.size > 100 else float("nan")
+    )
+    white_sigma = pix_sigma * np.sqrt(npix_aper)
     return {
         "sky_sigma": float(sigma),
+        "pixel_sigma": pix_sigma,
+        "white_sigma": float(white_sigma),
+        "correlation_ratio": float(sigma / white_sigma) if white_sigma > 0 else float("nan"),
+        "background": f"mesh{int(background_cell_size)}" if bkg is not None else "none",
         "n_apertures": len(accepted_sums),
         "n_attempts": n_attempts,
         "mean": float(mean),
@@ -460,10 +579,14 @@ def depth_from_empty_apertures(
     coverage_mask: str | np.ndarray | None = None,
     n_apertures: int = 2000,
     seed: int = 42,
+    background_cell_size: int | None = 256,
+    smoothing_box_size: int = 3,
 ) -> dict[str, float | int | str]:
     """Combine :func:`empty_aperture_sky_sigma` with the classical formula.
 
-    Returns the empty-aperture sigma fields plus ``depth``,
+    Returns the empty-aperture sigma fields plus ``depth`` (from
+    ``sky_sigma``), ``depth_white`` (from ``white_sigma``: uncorrelated
+    pixel noise, the convention of the coadd header's ``UL5_*``),
     ``zeropoint``, ``aperture_radius_pix`` and ``n_sigma`` for traceability.
     Source positions are taken from ``source_ra``/``source_dec`` (converted
     via the image WCS) when available, otherwise from ``source_x``/
@@ -480,15 +603,21 @@ def depth_from_empty_apertures(
         coverage_mask=coverage_mask,
         n_apertures=n_apertures,
         seed=seed,
+        background_cell_size=background_cell_size,
+        smoothing_box_size=smoothing_box_size,
     )
     out = dict(stats)
     out["zeropoint"] = float(zeropoint)
     out["aperture_radius_pix"] = float(aperture_radius_pix)
     out["n_sigma"] = float(n_sigma)
+    found = stats["status"] != "missing_image"
     out["depth"] = (
         classical_limiting_mag(n_sigma, zeropoint, stats["sky_sigma"])
-        if stats["status"] != "missing_image"
-        else float("nan")
+        if found else float("nan")
+    )
+    out["depth_white"] = (
+        classical_limiting_mag(n_sigma, zeropoint, stats.get("white_sigma", float("nan")))
+        if found else float("nan")
     )
     return out
 
@@ -528,6 +657,8 @@ def estimate_depths(
     seed: int = 42,
     do_error_curve: bool = True,
     do_empty_apertures: bool = True,
+    background_cell_size: int | None = 256,
+    smoothing_box_size: int = 3,
 ) -> dict[tuple[str, str], dict[str, float | int | str]]:
     """Run both depth methods for every ``(band, aperture)`` combination.
 
@@ -564,6 +695,9 @@ def estimate_depths(
         RNG seed for the empty-aperture method.
     do_error_curve, do_empty_apertures
         Toggle each method independently.
+    background_cell_size, smoothing_box_size
+        Background subtracted from the empty apertures (see
+        :func:`empty_aperture_sky_sigma`); pass the SE++ run's values.
 
     Returns
     -------
@@ -621,6 +755,8 @@ def estimate_depths(
                         coverage_mask=coverage_mask,
                         n_apertures=n_empty_apertures,
                         seed=seed,
+                        background_cell_size=background_cell_size,
+                        smoothing_box_size=smoothing_box_size,
                     )
 
             if entry:
@@ -644,7 +780,7 @@ def format_depth_table(
     lines = []
     header = (
         f"{n_sigma:.0f}-sigma depth (mag)   "
-        "| curve_fit  n     R^2    | empty_aper  n     sigma_ADU"
+        "| curve_fit  n     R^2    | empty_aper  n     sigma_ADU | white   corr"
     )
     lines.append(header)
     lines.append("-" * len(header))
@@ -659,7 +795,9 @@ def format_depth_table(
         empty_str = (
             f"{empty.get('depth', float('nan')):7.3f}"
             f"  {empty.get('n_apertures', 0):5d}"
-            f"  {empty.get('sky_sigma', float('nan')):.4g}"
+            f"  {empty.get('sky_sigma', float('nan')):<9.4g}"
+            f" | {empty.get('depth_white', float('nan')):6.3f}"
+            f"  {empty.get('correlation_ratio', float('nan')):4.2f}"
             if empty else "   ---       ---     ---"
         )
         lines.append(
@@ -677,6 +815,7 @@ def format_depth_table(
 #
 #   UL{N}EM{BAND}      N-sigma depth, error-curve fit, 5" aperture [mag]
 #   UL{N}RM{BAND}      N-sigma depth, background-RMS sampling, 5" aperture [mag]
+#   UL{N}WM{BAND}      N-sigma depth from the pixel sigma (white noise), 5" [mag]
 #   BRMSM{BAND}        Empty-aperture sky sigma (background RMS), 5" aperture [ADU]
 #
 #   ZP{APER}M{BAND}    Constant zero-point in magnitudes
@@ -805,8 +944,11 @@ def depth_results_to_meta(
     - ``UL{N}EM{BAND}`` -- N-sigma depth from the magnitude-error curve fit
       [mag].
     - ``UL{N}RM{BAND}`` -- N-sigma depth from the empty-aperture / background
-      RMS sampling [mag].
-    - ``BRMSM{BAND}``   -- raw empty-aperture sky sigma used to compute the
+      RMS sampling [mag] (includes correlated noise).
+    - ``UL{N}WM{BAND}`` -- N-sigma depth from the per-pixel sky sigma times
+      sqrt(aperture pixels) [mag]: white noise, comparable to the coadd
+      header's ``UL5_*``.
+    - ``BRMSM{BAND}``   -- background-subtracted empty-aperture sky sigma used to compute the
       depth above [ADU per 5" aperture].
 
     ``N`` reflects ``n_sigma`` (rounded to the nearest integer). The card
@@ -841,6 +983,12 @@ def depth_results_to_meta(
         # Sky sigma in ADU (raw empty-aperture noise; useful for sanity
         # checks and downstream limit-mag recomputation with an updated ZP).
         empty = entry.get("empty") or {}
+        white = empty.get("depth_white", float("nan"))
+        if np.isfinite(white):
+            _set_card(meta, owners, _depth_keyword(n, "W", band, band_keys), (
+                round(float(white), 3),
+                f"{n}sig {aperture} {band} white-noise depth [mag]",
+            ), band)
         sigma = empty.get("sky_sigma", float("nan"))
         if np.isfinite(sigma):
             _set_card(meta, owners, _sky_sigma_keyword(band, band_keys), (

@@ -244,6 +244,49 @@ def test_medium_only_keeps_wide_bands() -> None:
     assert not _is_broad_band("m386")
 
 
+# --- empty-aperture depth -------------------------------------------------
+def test_empty_aperture_subtracts_mesh_background(tmp_path) -> None:
+    from phot7ds.depth import depth_from_empty_apertures, mesh_background
+
+    rng = np.random.default_rng(0)
+    ny = nx = 1024
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    sky = 0.5 * np.sin(xx / 200.0) * np.cos(yy / 260.0) + 0.0005 * xx
+    data = (sky + rng.normal(0.0, 1.0, (ny, nx))).astype(np.float32)
+    data[:, :40] = 0.0  # no-data strip
+    path = tmp_path / "img.fits"
+    fits.PrimaryHDU(data).writeto(str(path))
+
+    bkg = mesh_background(data, data != 0, cell_size=128, smoothing_box_size=1)
+    inner = (slice(150, 850), slice(150, 850))
+    assert np.std(bkg(xx[inner], yy[inner]) - sky[inner]) < 0.03
+    assert np.std(bkg(xx[:, 40:], yy[:, 40:]) - sky[:, 40:]) < 0.04
+
+    r = 4.95
+    kw = dict(zeropoint=25.0, n_apertures=1500, seed=1, smoothing_box_size=1)
+    raw = depth_from_empty_apertures(str(path), r, background_cell_size=None, **kw)
+    sub = depth_from_empty_apertures(str(path), r, background_cell_size=128, **kw)
+    n_pix = 69  # pixels in an r = 4.95 disc
+    assert sub["sky_sigma"] == pytest.approx(np.sqrt(n_pix), rel=0.12)
+    assert sub["correlation_ratio"] == pytest.approx(1.0, abs=0.12)
+    assert raw["sky_sigma"] > 1.5 * sub["sky_sigma"]
+    assert sub["depth"] > raw["depth"] + 0.4
+    assert sub["depth_white"] == pytest.approx(sub["depth"], abs=0.15)
+    assert sub["background"] == "mesh128" and raw["background"] == "none"
+
+
+def test_white_depth_header_card() -> None:
+    from phot7ds.depth import depth_results_to_meta
+
+    meta: dict = {}
+    depth_results_to_meta(meta, {("aper05", "g"): {
+        "curve": {"depth": 20.9},
+        "empty": {"depth": 20.7, "depth_white": 20.95, "sky_sigma": 2.3},
+    }})
+    assert meta["UL5WMG"][0] == pytest.approx(20.95)
+    assert meta["UL5RMG"][0] == pytest.approx(20.7)
+
+
 # --- output format --------------------------------------------------------
 def test_resolve_output_format() -> None:
     from phot7ds.catalog_io import FITS_MAX_COLUMNS, resolve_output_format

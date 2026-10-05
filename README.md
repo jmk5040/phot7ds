@@ -567,11 +567,18 @@ by side:
    point-like, well-detected sources and returns the magnitude where
    `magerr ≈ 1.0857/N` (= 0.217 mag for `N=5`). Pure-catalog, no I/O.
 2. **Empty-aperture sky sigma** — drops ~2000 random circular apertures
-   on each science image at positions that avoid catalog sources, takes
-   the sigma-clipped stddev of the summed aperture fluxes as `σ_aper`,
-   and reports `ZP − 2.5·log10(N · σ_aper)`. Captures correlated
-   background noise without the cost of a full background-RMS check
-   image.
+   on each science image at positions that avoid catalog sources and
+   no-data pixels, subtracts an SE++-like mesh background
+   (`background_cell_size`, `smoothing_box_size`, the same values SE++ uses)
+   from each aperture sum, takes the sigma-clipped stddev of the sums as
+   `σ_aper`, and reports `ZP − 2.5·log10(N · σ_aper)`. This includes
+   pixel-to-pixel correlated noise (from resampling/coadding), which the
+   error curve and the coadd header's `UL5_*` (both white-noise
+   estimates) miss, so it usually comes out ~0.1–0.2 mag shallower than
+   those. Each band also gets the white-noise depth
+   `ZP − 2.5·log10(N · σ_pix · √n_pix)`, which can be compared directly
+   with the header, and the ratio `σ_aper / (σ_pix · √n_pix)`
+   (`correlation_ratio`, ~1.2 on 7DS coadds).
 
 Results are written to:
 
@@ -582,7 +589,9 @@ Results are written to:
   - `UL{N}EM{BAND}` -- N-sigma depth from the magnitude-error curve fit
     [mag].
   - `UL{N}RM{BAND}` -- N-sigma depth from the empty-aperture / background
-    RMS sampling [mag].
+    RMS sampling [mag] (includes correlated noise).
+  - `UL{N}WM{BAND}` -- white-noise N-sigma depth from the background-
+    subtracted pixel RMS [mag]; same convention as the coadd `UL5_*`.
   - `BRMSM{BAND}`   -- the empty-aperture sky sigma in ADU, useful for
     recomputing the limiting magnitude with an updated ZP.
 

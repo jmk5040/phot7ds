@@ -937,6 +937,8 @@ def run_photometry(
                 seed=cfg.depth_seed,
                 do_error_curve=True,
                 do_empty_apertures=cfg.depth_empty_aperture,
+                background_cell_size=cfg.background_cell_size,
+                smoothing_box_size=cfg.smoothing_box_size,
             )
             if depth_results:
                 log.info(
